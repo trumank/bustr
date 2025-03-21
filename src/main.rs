@@ -1,7 +1,8 @@
 use clap::Parser;
+use colored::{ColoredString, Colorize as _};
 use iced_x86::{
-    Decoder, DecoderOptions, Formatter, FormatterOutput, FormatterTextKind, GasFormatter,
-    Instruction, IntelFormatter, NasmFormatter,
+    Decoder, DecoderOptions, Formatter, FormatterOutput, FormatterTextKind, Instruction,
+    IntelFormatter,
 };
 use object::{File, Object, ObjectSection, ObjectSymbol};
 use pdb::{FallibleIterator, PDB, SymbolData};
@@ -136,7 +137,6 @@ fn load_object_symbols(object_path: &Path) -> Result<Vec<SymbolInfo>, Disassembl
 fn disassemble(
     file_path: &Path,
     pdb_path: Option<&Path>,
-    syntax: &str,
     mut start_address: Option<u64>,
     symbol: Option<String>,
     length: Option<usize>,
@@ -168,7 +168,7 @@ fn disassemble(
             symbols => {
                 println!("Found multiple matches for {symbol:?}:");
                 for sym in symbols {
-                    println!("{:X} {}", sym.address, sym.display_name());
+                    println!("{:X} {}", sym.address, colors::symbol(sym.display_name()));
                 }
                 return Ok(());
             }
@@ -231,13 +231,7 @@ fn disassemble(
         DecoderOptions::NONE,
     );
 
-    // Choose formatter based on syntax
-    let mut formatter: Box<dyn Formatter> = match syntax.to_lowercase().as_str() {
-        "intel" => Box::new(IntelFormatter::new()),
-        "gas" => Box::new(GasFormatter::new()),
-        "nasm" => Box::new(NasmFormatter::new()),
-        _ => Box::new(IntelFormatter::new()), // Default to Intel syntax
-    };
+    let mut formatter = IntelFormatter::new();
 
     //formatter.options_mut().set_digit_separator("`");
     formatter.options_mut().set_first_operand_char_index(10);
@@ -258,7 +252,7 @@ fn disassemble(
 
         if let Some(sym) = symbol_map.get(&instr_address) {
             println!();
-            println!(" ; {}", sym.display_name());
+            println!(" ; {}", colors::symbol(sym.display_name()));
             println!();
         }
 
@@ -321,7 +315,7 @@ fn disassemble(
         let target = instruction.near_branch_target();
         if target != 0 {
             if let Some(sym) = symbol_map.get(&target) {
-                output.push_str(&format!(" ; -> {}", sym.display_name()));
+                output.push_str(&format!(" ; -> {}", colors::symbol(sym.display_name())));
             }
         }
 
@@ -389,22 +383,23 @@ fn format_data(data: &[u8]) -> String {
         }
     };
 
-    if let Some((t, str)) = str {
-        format!(
-            "-> {}{str:?}",
+    let data = if let Some((t, str)) = str {
+        colors::data_string(format!(
+            "{}{str:?}",
             match t {
                 StrType::Str => "",
                 StrType::WStr => "L",
             }
-        )
+        ))
     } else {
-        let mut output = String::from("-> [");
+        let mut output = String::from("[");
         for b in data {
             output.push_str(&format!(" {b:02X}"));
         }
         output.push(']');
-        output
-    }
+        colors::data_bytes(output)
+    };
+    format!(" -> {data}")
 }
 
 // Custom formatter output
@@ -412,8 +407,31 @@ struct MyFormatterOutput<'a>(&'a mut String);
 
 impl<'a> FormatterOutput for MyFormatterOutput<'a> {
     fn write(&mut self, text: &str, kind: FormatterTextKind) {
-        // You can use kind to colorize output if desired
-        self.0.push_str(text);
+        self.0.push_str(&get_color(text, kind).to_string());
+    }
+}
+
+fn get_color(s: &str, kind: FormatterTextKind) -> ColoredString {
+    match kind {
+        FormatterTextKind::Directive | FormatterTextKind::Keyword => s.bright_yellow(),
+        FormatterTextKind::Prefix | FormatterTextKind::Mnemonic => s.bright_red(),
+        FormatterTextKind::Register => s.bright_blue(),
+        FormatterTextKind::Number => s.bright_cyan(),
+        _ => s.white(),
+    }
+}
+
+mod colors {
+    use colored::{ColoredString, Colorize as _};
+
+    pub fn symbol<S: AsRef<str>>(txt: S) -> ColoredString {
+        txt.as_ref().bright_yellow()
+    }
+    pub fn data_string<S: AsRef<str>>(txt: S) -> ColoredString {
+        txt.as_ref().bright_red()
+    }
+    pub fn data_bytes<S: AsRef<str>>(txt: S) -> ColoredString {
+        txt.as_ref().bright_cyan()
     }
 }
 
@@ -432,10 +450,6 @@ struct Cli {
     /// Path to PDB file for debug symbols
     #[clap(short, long, value_parser)]
     pdb: Option<PathBuf>,
-
-    /// Symbol format: inline or full
-    #[clap(short = 'f', long, default_value = "full")]
-    format: String,
 
     /// Start address for disassembly (hexadecimal)
     #[clap(short, long, value_parser = parse_hex_address)]
@@ -467,13 +481,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         None
     };
 
-    disassemble(
-        &args.input,
-        pdb,
-        &args.format,
-        args.address,
-        args.symbol,
-        args.length,
-    )
-    .map_err(|e| Box::new(e) as Box<dyn Error>)
+    disassemble(&args.input, pdb, args.address, args.symbol, args.length)
+        .map_err(|e| Box::new(e) as Box<dyn Error>)
 }
