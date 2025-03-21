@@ -11,6 +11,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::{error::Error, fmt};
 
 // Custom error type for our disassembler
@@ -69,13 +70,71 @@ impl SymbolInfo {
     }
 }
 
+#[derive(Clone)]
+struct MemmapSource<'data> {
+    data: &'data [u8],
+}
+struct MemmapSourceView {
+    data: Vec<u8>,
+}
+impl std::fmt::Debug for MemmapSource<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MemmapSource").finish_non_exhaustive()
+    }
+}
+impl std::fmt::Debug for MemmapSourceView {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("MemmapSourceView").finish_non_exhaustive()
+    }
+}
+impl<'s> pdb::SourceView<'s> for MemmapSourceView {
+    fn as_slice(&self) -> &[u8] {
+        &self.data
+    }
+}
+
+impl<'s> pdb::Source<'s> for MemmapSource<'s> {
+    fn view(
+        &mut self,
+        slices: &[pdb::SourceSlice],
+    ) -> Result<Box<dyn pdb::SourceView<'s>>, std::io::Error> {
+        let len = slices.iter().fold(0, |acc, s| acc + s.size);
+
+        let mut v = MemmapSourceView { data: vec![0; len] };
+
+        {
+            let bytes = v.data.as_mut_slice();
+            let mut output_offset: usize = 0;
+
+            //let continuous = slices.windows(2).all(|pair| {
+            //    pair[0].offset + pair[0].size as u64 == pair[1].offset
+            //});
+            //dbg!((continuous, len));
+
+            for slice in slices {
+                if slice.offset % 4096 != 0 {
+                    println!("{:X}", slice.offset);
+                }
+                bytes[output_offset..(output_offset + slice.size)].copy_from_slice(
+                    &self.data[slice.offset as usize..slice.offset as usize + slice.size],
+                );
+                output_offset += slice.size;
+            }
+        }
+
+        Ok(Box::new(v))
+    }
+}
+
 // Function to load debug symbols from PDB file
 fn load_pdb_symbols(
     image_base: u64,
     pdb_path: &Path,
 ) -> Result<Vec<SymbolInfo>, DisassemblerError> {
     let file = fs::File::open(pdb_path)?;
-    let mut pdb = PDB::open(file)?;
+    use memmap2::Mmap;
+    let mmap = unsafe { Mmap::map(&file)? };
+    let mut pdb = PDB::open(MemmapSource { data: &mmap })?;
 
     let symbol_table = pdb.global_symbols()?;
     let address_map = pdb.address_map()?;
