@@ -10,8 +10,10 @@ debug = true
 clap = { version = "4.5.32", features = ["derive"] }
 colored = "3.0.0"
 iced-x86 = "1.21.0"
+libc = "0.2.171"
 memmap2 = "0.9.5"
 msvc-demangler = "0.11.0"
 object = "0.36.7"
+page_size = "0.6.0"
 pdb = "0.8.0"
 rayon = "1.10.0"
