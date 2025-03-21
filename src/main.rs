@@ -6,6 +6,7 @@ use iced_x86::{
 };
 use object::{File, Object, ObjectSection, ObjectSymbol};
 use pdb::{FallibleIterator, PDB, SymbolData};
+use rayon::prelude::*;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
@@ -84,32 +85,27 @@ fn load_pdb_symbols(
     while let Some(symbol) = symbol_iter.next()? {
         if let Ok(SymbolData::Public(data)) = symbol.parse() {
             if let Some(rva) = data.offset.to_rva(&address_map) {
-                let name = data.name.to_string().to_string();
                 symbols.push(SymbolInfo {
                     address: image_base + rva.0 as u64,
-                    demangled: msvc_demangler::demangle(
-                        &name,
-                        msvc_demangler::DemangleFlags::COMPLETE,
-                    )
-                    .ok(),
-                    name,
+                    name: data.name.to_string().to_string(),
+                    demangled: None,
                 });
             }
         } else if let Ok(SymbolData::Procedure(data)) = symbol.parse() {
             if let Some(rva) = data.offset.to_rva(&address_map) {
-                let name = data.name.to_string().to_string();
                 symbols.push(SymbolInfo {
                     address: image_base + rva.0 as u64,
-                    demangled: msvc_demangler::demangle(
-                        &name,
-                        msvc_demangler::DemangleFlags::COMPLETE,
-                    )
-                    .ok(),
-                    name,
+                    name: data.name.to_string().to_string(),
+                    demangled: None,
                 });
             }
         }
     }
+
+    symbols.par_iter_mut().for_each(|sym| {
+        sym.demangled =
+            msvc_demangler::demangle(&sym.name, msvc_demangler::DemangleFlags::COMPLETE).ok();
+    });
 
     Ok(symbols)
 }
