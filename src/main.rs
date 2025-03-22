@@ -337,9 +337,9 @@ fn disassemble(
     symbols.sort_by_key(|s| s.address);
 
     // Create a map for quick symbol lookup
-    let mut symbol_map = HashMap::new();
+    let mut symbol_map: HashMap<u64, Vec<&SymbolInfo>> = HashMap::new();
     for symbol in &symbols {
-        symbol_map.insert(symbol.address, symbol);
+        symbol_map.entry(symbol.address).or_default().push(symbol);
     }
 
     // Find the .text section
@@ -408,9 +408,11 @@ fn disassemble(
         // Check if instruction address matches a known symbol
         let instr_address = instruction.ip();
 
-        if let Some(sym) = symbol_map.get(&instr_address) {
+        if let Some(syms) = symbol_map.get(&instr_address) {
             println!();
-            println!(" ; {}", colors::symbol(sym.display_name()));
+            for sym in syms {
+                println!(" ; {}", colors::symbol(sym.display_name()));
+            }
             println!();
         }
 
@@ -472,8 +474,11 @@ fn disassemble(
         // Add inline symbols if in that mode
         let target = instruction.near_branch_target();
         if target != 0 {
-            if let Some(sym) = symbol_map.get(&target) {
-                output.push_str(&format!(" ; -> {}", colors::symbol(sym.display_name())));
+            if let Some(syms) = symbol_map.get(&target) {
+                output.push_str(&format!(" ; -> "));
+                for sym in syms {
+                    output.push_str(&format!(" // {}", colors::symbol(sym.display_name())));
+                }
             }
         }
 
