@@ -21,7 +21,7 @@ use ui::{App, restore_terminal, run_app, setup_terminal};
 
 // Custom error type for our disassembler
 #[derive(Debug)]
-enum DisassemblerError {
+pub enum DisassemblerError {
     Io(std::io::Error),
     Object(object::Error),
     Pdb(pdb::Error),
@@ -593,9 +593,8 @@ pub fn disassemble_range(
         }
     }
 
-    // If we didn't find a section containing the address, use the .text section
     if !section_found {
-        text_section = obj_file.section_by_name(".text");
+        return Ok(vec![]);
     }
 
     let text_section =
@@ -738,6 +737,8 @@ pub fn disassemble_range(
 
 // Update the main function to load the binary data once
 fn main() -> Result<(), Box<dyn Error>> {
+    color_eyre::install()?;
+
     let args = Cli::parse();
 
     let adj_pdb = args.input.with_extension("pdb");
@@ -848,7 +849,7 @@ fn get_initial_disassembly(
     };
 
     // Disassemble from the starting address
-    let disassembly = disassemble_range(binary_data, start_address, 30)?;
+    let disassembly = disassemble_range(binary_data, start_address, 30).unwrap_or_default();
 
     Ok((disassembly, start_address))
 }

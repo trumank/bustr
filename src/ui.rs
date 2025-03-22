@@ -1,12 +1,15 @@
 use crate::{
     BinaryData, DisassemblyComment, DisassemblyLine, SymbolInfo, SymbolKind,
-    fuzzy::{fuzzy_match, highlight_matches},
+    fuzzy::highlight_matches,
 };
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use nucleo::pattern::{CaseMatching, Normalization};
 use object::{Object, ObjectSection as _};
 use ratatui::{
     Frame, Terminal,
@@ -17,7 +20,6 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 use std::{
-    cmp::Ordering,
     error::Error,
     io,
     path::Path,
@@ -33,7 +35,10 @@ pub struct App {
     pub selected_symbol_index: Option<usize>,
     pub show_help: bool,
     pub should_quit: bool,
+
     pub active_pane: Pane,
+    pub search_mode: bool,
+
     pub disassembly_state: ListState,
     pub symbol_state: ListState,
     pub current_address: u64,
@@ -41,9 +46,8 @@ pub struct App {
     pub pdb_path: Option<PathBuf>,
     pub needs_refresh: bool,
     pub binary_data: Option<BinaryData>,
-    pub search_mode: bool,
     pub search_query: String,
-    pub filtered_symbols: Vec<(usize, SymbolInfo, u32)>, // (original_index, symbol, score)
+    nucleo: nucleo::Nucleo<SymbolInfo>,
 }
 
 #[derive(PartialEq)]
@@ -68,7 +72,10 @@ impl App {
             selected_symbol_index: None,
             show_help: false,
             should_quit: false,
+
             active_pane: Pane::Disassembly,
+            search_mode: false,
+
             disassembly_state,
             symbol_state,
             current_address: 0,
@@ -76,9 +83,13 @@ impl App {
             pdb_path: None,
             needs_refresh: false,
             binary_data: None,
-            search_mode: false,
             search_query: String::new(),
-            filtered_symbols: Vec::new(),
+            nucleo: nucleo::Nucleo::new(
+                nucleo::Config::DEFAULT,
+                std::sync::Arc::new(|| { /* erm */ }),
+                None,
+                1,
+            ),
         }
     }
 
@@ -88,6 +99,11 @@ impl App {
 
     pub fn set_symbols(&mut self, symbols: Vec<SymbolInfo>) {
         self.symbols = symbols;
+        for sym in &self.symbols {
+            self.nucleo.injector().push(sym.clone(), |sym, columns| {
+                columns[0] = sym.demangled.as_deref().unwrap_or(&sym.name).into();
+            });
+        }
     }
 
     pub fn set_file_info(&mut self, file_path: &Path, pdb_path: Option<&Path>) {
@@ -117,16 +133,10 @@ impl App {
                 }
             }
             Pane::Symbols => {
-                if self.search_mode {
-                    if self.symbol_scroll > 0 {
-                        self.symbol_scroll -= 1;
-                        self.symbol_state.select(Some(self.symbol_scroll));
-                    }
-                } else {
-                    if self.symbol_scroll > 0 {
-                        self.symbol_scroll -= 1;
-                        self.symbol_state.select(Some(self.symbol_scroll));
-                    }
+                if self.symbol_scroll > 0 {
+                    self.symbol_scroll -= 1;
+                    self.symbol_state.select(Some(self.symbol_scroll));
+                    self.select_symbol();
                 }
             }
         }
@@ -145,16 +155,10 @@ impl App {
                 }
             }
             Pane::Symbols => {
-                if self.search_mode {
-                    if self.symbol_scroll < self.filtered_symbols.len().saturating_sub(1) {
-                        self.symbol_scroll += 1;
-                        self.symbol_state.select(Some(self.symbol_scroll));
-                    }
-                } else {
-                    if self.symbol_scroll < self.symbols.len().saturating_sub(1) {
-                        self.symbol_scroll += 1;
-                        self.symbol_state.select(Some(self.symbol_scroll));
-                    }
+                if self.symbol_scroll < self.symbols.len().saturating_sub(1) {
+                    self.symbol_scroll += 1;
+                    self.symbol_state.select(Some(self.symbol_scroll));
+                    self.select_symbol();
                 }
             }
         }
@@ -180,6 +184,7 @@ impl App {
             Pane::Symbols => {
                 self.symbol_scroll = self.symbol_scroll.saturating_sub(page_size);
                 self.symbol_state.select(Some(self.symbol_scroll));
+                self.select_symbol();
             }
         }
     }
@@ -204,6 +209,7 @@ impl App {
                 let max = self.symbols.len().saturating_sub(1);
                 self.symbol_scroll = (self.symbol_scroll + page_size).min(max);
                 self.symbol_state.select(Some(self.symbol_scroll));
+                self.select_symbol();
             }
         }
     }
@@ -221,28 +227,22 @@ impl App {
 
     pub fn select_symbol(&mut self) {
         if self.active_pane == Pane::Symbols {
-            if self.search_mode && !self.filtered_symbols.is_empty() {
-                let idx = self.symbol_scroll;
-                if idx < self.filtered_symbols.len() {
-                    let original_idx = self.filtered_symbols[idx].0;
-                    self.selected_symbol_index = Some(original_idx);
+            let idx = self.symbol_scroll;
+            if self.search_mode {
+                let snapshot = self.nucleo.snapshot();
 
-                    let symbol = &self.symbols[original_idx];
-                    self.set_current_address(symbol.address);
-
-                    // Exit search mode and switch to disassembly
-                    self.search_mode = false;
-                    self.active_pane = Pane::Disassembly;
+                if let Some(item) = snapshot.get_matched_item(self.symbol_scroll as u32) {
+                    self.set_current_address(item.data.address);
                 }
-            } else if !self.symbols.is_empty() {
-                let idx = self.symbol_scroll;
+            } else {
                 if idx < self.symbols.len() {
+                    // idk what this index is. symbol array? search view?
                     self.selected_symbol_index = Some(idx);
 
                     let symbol = &self.symbols[idx];
                     self.set_current_address(symbol.address);
 
-                    self.active_pane = Pane::Disassembly;
+                    //self.active_pane = Pane::Disassembly;
                 }
             }
         }
@@ -334,18 +334,10 @@ impl App {
                 self.needs_refresh = true;
             }
             Pane::Symbols => {
-                if self.search_mode {
-                    if !self.filtered_symbols.is_empty() {
-                        let last_idx = self.filtered_symbols.len() - 1;
-                        self.symbol_scroll = last_idx;
-                        self.symbol_state.select(Some(last_idx));
-                    }
-                } else {
-                    if !self.symbols.is_empty() {
-                        let last_idx = self.symbols.len() - 1;
-                        self.symbol_scroll = last_idx;
-                        self.symbol_state.select(Some(last_idx));
-                    }
+                if !self.symbols.is_empty() {
+                    let last_idx = self.symbols.len() - 1;
+                    self.symbol_scroll = last_idx;
+                    self.symbol_state.select(Some(last_idx));
                 }
             }
         }
@@ -400,7 +392,7 @@ impl App {
             self.search_mode = !self.search_mode;
             if self.search_mode {
                 self.search_query.clear();
-                self.update_filtered_symbols();
+                self.update_filtered_symbols(false);
             }
         }
     }
@@ -408,57 +400,36 @@ impl App {
     pub fn add_to_search(&mut self, c: char) {
         if self.search_mode {
             self.search_query.push(c);
-            self.update_filtered_symbols();
+            self.update_filtered_symbols(true);
         }
     }
 
     pub fn backspace_search(&mut self) {
         if self.search_mode && !self.search_query.is_empty() {
             self.search_query.pop();
-            self.update_filtered_symbols();
+            self.update_filtered_symbols(false);
         }
     }
 
     pub fn clear_search(&mut self) {
         if self.search_mode {
             self.search_query.clear();
-            self.update_filtered_symbols();
+            self.update_filtered_symbols(false);
         }
     }
 
-    pub fn update_filtered_symbols(&mut self) {
-        if self.search_query.is_empty() {
-            // If search is empty, include all symbols with a score of 0
-            self.filtered_symbols = self
-                .symbols
-                .iter()
-                .enumerate()
-                .map(|(i, sym)| (i, sym.clone(), 0))
-                .collect();
-        } else {
-            // Perform fuzzy search
-            let query = self.search_query.to_lowercase();
+    pub fn update_filtered_symbols(&mut self, append: bool) {
+        // Perform fuzzy search
+        let query = self.search_query.to_lowercase();
 
-            self.filtered_symbols = self
-                .symbols
-                .iter()
-                .enumerate()
-                .filter_map(|(i, sym)| {
-                    let name = sym.demangled.as_ref().unwrap_or(&sym.name).to_lowercase();
-                    let score = fuzzy_match(&name, &query);
-                    score.map(|s| (i, sym.clone(), s))
-                })
-                .collect();
+        self.nucleo
+            .pattern
+            .reparse(0, &query, CaseMatching::Smart, Normalization::Smart, append);
 
-            // Sort by score (higher is better)
-            self.filtered_symbols.sort_by(|a, b| b.2.cmp(&a.2));
-        }
+        self.nucleo.tick(10);
 
         // Reset scroll position
         self.symbol_scroll = 0;
-        if !self.filtered_symbols.is_empty() {
-            self.symbol_state.select(Some(0));
-        }
     }
 }
 
@@ -498,13 +469,15 @@ pub fn run_app<B: Backend>(
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     // Handle search mode separately
-                    if app.search_mode {
+                    if (app.active_pane == Pane::Symbols && app.search_mode)
+                        && !key.modifiers.contains(KeyModifiers::CONTROL)
+                    {
                         match key.code {
                             KeyCode::Esc => app.toggle_search(),
                             KeyCode::Backspace => app.backspace_search(),
                             KeyCode::Enter => app.select_symbol(),
-                            KeyCode::Up | KeyCode::Char('k') => app.scroll_up(),
-                            KeyCode::Down | KeyCode::Char('j') => app.scroll_down(),
+                            KeyCode::Up => app.scroll_up(),
+                            KeyCode::Down => app.scroll_down(),
                             KeyCode::Char(c) => app.add_to_search(c),
                             _ => {}
                         }
@@ -514,6 +487,14 @@ pub fn run_app<B: Backend>(
                                 app.should_quit = true;
                                 break;
                             }
+
+                            KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                app.active_pane = Pane::Disassembly
+                            }
+                            KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                app.active_pane = Pane::Symbols
+                            }
+
                             KeyCode::Char('?') | KeyCode::Char('h') => app.toggle_help(),
                             KeyCode::Tab => app.toggle_pane(),
                             KeyCode::Up | KeyCode::Char('k') => app.scroll_up(),
@@ -537,6 +518,7 @@ pub fn run_app<B: Backend>(
                             }
                             KeyCode::Char('g') => app.jump_to_top(),
                             KeyCode::Char('G') => app.jump_to_bottom(),
+
                             KeyCode::Char('/') => app.toggle_search(), // Start search with /
                             _ => {}
                         }
@@ -718,12 +700,20 @@ fn ui(f: &mut Frame, app: &App) {
     let symbols_height = symbols_chunks.last().unwrap().height as usize - 2;
 
     let (symbol_items, total_count, start_idx, end_idx) = if app.search_mode {
-        let start_idx = app.symbol_scroll.saturating_sub(symbols_height / 2);
-        let end_idx = (start_idx + symbols_height).min(app.filtered_symbols.len());
+        let snapshot = app.nucleo.snapshot();
+        let count = snapshot.item_count() as usize;
 
-        let items: Vec<_> = app.filtered_symbols[start_idx..end_idx]
-            .iter()
-            .map(|(_, symbol, score)| {
+        let start_idx = app
+            .symbol_scroll
+            .saturating_sub(symbols_height / 2)
+            .min(count.saturating_sub(1));
+        let end_idx = (start_idx + symbols_height).min(count.saturating_sub(1));
+
+        let items: Vec<_> = snapshot
+            .matched_items(start_idx as u32..end_idx as u32)
+            .map(|item| {
+                let symbol = item.data;
+
                 let name = if let Some(n) = &symbol.demangled {
                     n
                 } else {
@@ -741,10 +731,10 @@ fn ui(f: &mut Frame, app: &App) {
                     )];
 
                     // Add score indicator
-                    spans.push(Span::styled(
-                        format!("[{}] ", score),
-                        Style::default().fg(Color::Green),
-                    ));
+                    //spans.push(Span::styled(
+                    //    format!("[{}] ", score),
+                    //    Style::default().fg(Color::Green),
+                    //));
 
                     // Use the highlight_matches function to get match positions
                     let highlights = highlight_matches(name, &app.search_query);
@@ -768,7 +758,7 @@ fn ui(f: &mut Frame, app: &App) {
             })
             .collect();
 
-        (items, app.filtered_symbols.len(), start_idx, end_idx)
+        (items, count, start_idx, end_idx)
     } else {
         // Regular symbol display (no search)
         let start_idx = app.symbol_scroll.saturating_sub(symbols_height / 2);
