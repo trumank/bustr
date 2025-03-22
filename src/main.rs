@@ -3,7 +3,6 @@ mod pdb_loader;
 mod ui;
 
 use clap::Parser;
-use colored::{ColoredString, Colorize as _};
 use iced_x86::{
     Decoder, DecoderOptions, Formatter, FormatterOutput, FormatterTextKind, Instruction,
     IntelFormatter,
@@ -11,7 +10,6 @@ use iced_x86::{
 use object::{File, Object, ObjectSection, ObjectSymbol};
 use pdb::{FallibleIterator, PDB, SymbolData};
 use rayon::prelude::*;
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -75,16 +73,8 @@ enum SymbolKind {
 }
 
 impl SymbolInfo {
-    fn display_name(&self) -> ColoredString {
-        let txt = if let Some(n) = &self.demangled {
-            n
-        } else {
-            &self.name
-        };
-        match self.kind {
-            SymbolKind::Function => colors::symbol_function(txt),
-            SymbolKind::Data => colors::symbol_data(txt),
-        }
+    fn display_name(&self) -> &str {
+        self.demangled.as_deref().unwrap_or(&self.name)
     }
 }
 
@@ -153,303 +143,6 @@ fn load_object_symbols(object_path: &Path) -> Result<Vec<SymbolInfo>, Disassembl
     }
 
     Ok(symbols)
-}
-
-// Function to disassemble a binary file and return the disassembly as a vector of strings
-fn disassemble_to_vec(
-    file_path: &Path,
-    pdb_path: Option<&Path>,
-    start_address: Option<u64>,
-    symbol: Option<String>,
-    length: Option<usize>,
-) -> Result<(Vec<DisassemblyLine>, Vec<SymbolInfo>), DisassemblerError> {
-    // Read the executable file
-    let data = fs::read(file_path)?;
-    let obj_file = File::parse(&*data)?;
-
-    // Load symbols from PDB if available, otherwise from object file
-    let mut symbols = if let Some(pdb) = pdb_path {
-        load_pdb_symbols(obj_file.relative_address_base(), pdb)?
-    } else {
-        load_object_symbols(file_path)?
-    };
-
-    let mut start_addr = start_address;
-
-    if let Some(symbol_name) = symbol {
-        let matches: Vec<_> = symbols
-            .iter()
-            .filter(|s| s.display_name().contains(&symbol_name))
-            .collect();
-        match &matches[..] {
-            [] => {
-                return Err(DisassemblerError::Format(format!(
-                    "No symbols matching {symbol_name:?} found"
-                )));
-            }
-            [symbol] => {
-                start_addr = Some(symbol.address);
-            }
-            symbols => {
-                todo!();
-                //let mut result = Vec::new();
-                //result.push(format!("Found multiple matches for {symbol_name:?}:"));
-                //for sym in symbols {
-                //    result.push(format!("{:X} {}", sym.address, sym.display_name()));
-                //}
-                //return Ok((result, Vec::new()));
-            }
-        }
-    }
-
-    // Sort symbols by address for binary search
-    symbols.sort_by_key(|s| s.address);
-
-    // Create a map for quick symbol lookup
-    let mut symbol_map: HashMap<u64, Vec<&SymbolInfo>> = HashMap::new();
-    for symbol in &symbols {
-        symbol_map.entry(symbol.address).or_default().push(symbol);
-    }
-
-    let text_section = if let Some(start_address) = start_addr {
-        let mut ret_section = None;
-        for section in obj_file.sections() {
-            let sec_address = section.address();
-            let sec_data = section.data()?;
-            let mem_range = sec_address..sec_address + sec_data.len() as u64;
-            if mem_range.contains(&start_address) {
-                ret_section = Some(section);
-                break;
-            }
-        }
-        ret_section.ok_or_else(|| {
-            DisassemblerError::Format(format!("No sections contain address 0x{start_address:X}"))
-        })
-    } else {
-        // Find the .text section
-        obj_file
-            .section_by_name(".text")
-            .ok_or_else(|| DisassemblerError::Format("Text section not found".into()))
-    }?;
-
-    let text_data = text_section.data()?;
-    let text_address = text_section.address();
-
-    // Determine architecture and bitness
-    let architecture = match obj_file.architecture() {
-        object::Architecture::X86_64 => 64,
-        object::Architecture::I386 => 32,
-        arch => {
-            return Err(DisassemblerError::Format(format!(
-                "Unsupported architecture: {:?}",
-                arch
-            )));
-        }
-    };
-
-    // Calculate the range to disassemble
-    let start = start_addr.unwrap_or(0);
-    let offset = if start >= text_address {
-        (start - text_address) as usize
-    } else {
-        0
-    };
-
-    let end = if let Some(len) = length {
-        (offset + len).min(text_data.len())
-    } else {
-        text_data.len()
-    };
-
-    if offset >= text_data.len() {
-        return Err(DisassemblerError::Format(
-            "Start address is outside of text section".into(),
-        ));
-    }
-
-    // Create decoder
-    let mut decoder = Decoder::with_ip(
-        architecture,
-        &text_data[offset..end],
-        text_address + offset as u64,
-        DecoderOptions::NONE,
-    );
-
-    let mut formatter = IntelFormatter::new();
-    formatter.options_mut().set_first_operand_char_index(10);
-
-    // Create a vector to store structured disassembly lines
-    let mut result = Vec::new();
-    let mut instruction = Instruction::default();
-
-    // Disassemble instructions
-    while decoder.can_decode() {
-        // Decode instruction
-        decoder.decode_out(&mut instruction);
-
-        // Check if instruction address matches a known symbol
-        let instr_address = instruction.ip();
-
-        if let Some(syms) = symbol_map.get(&instr_address) {
-            result.push(DisassemblyLine::Empty);
-            for sym in syms {
-                result.push(DisassemblyLine::Symbol((*sym).clone()));
-            }
-            result.push(DisassemblyLine::Empty);
-        }
-
-        // Format the instruction address and bytes
-        let address = instruction.ip();
-        let start_index = (instruction.ip() - text_address as u64) as usize;
-        let instr_bytes = &text_data[start_index..start_index + instruction.len()];
-
-        // Format the instruction
-        let mut instr_text = String::new();
-        formatter.format(&instruction, &mut PlainFormatterOutput(&mut instr_text));
-
-        // Create a structured instruction line
-        let mut line = DisassemblyLine::Instruction {
-            address,
-            bytes: instr_bytes.to_vec(),
-            instruction: instr_text,
-            comments: Vec::new(),
-        };
-
-        // Add branch target comments if applicable
-        let target = instruction.near_branch_target();
-        if target != 0 {
-            if let Some(syms) = symbol_map.get(&target) {
-                for sym in syms {
-                    if let DisassemblyLine::Instruction { comments, .. } = &mut line {
-                        comments.push(DisassemblyComment::BranchTarget((*sym).clone()));
-                    }
-                }
-            }
-        }
-
-        // Add memory reference comments if applicable
-        if instruction.is_ip_rel_memory_operand() {
-            let address = instruction.ip_rel_memory_address();
-
-            for section in obj_file.sections() {
-                let sec_address = section.address();
-                let sec_data = section.data()?;
-                let mem_range = sec_address..sec_address + sec_data.len() as u64;
-                if mem_range.contains(&address) {
-                    let data = &sec_data[(address - sec_address) as usize
-                        ..((address - sec_address) as usize + 100).min(sec_data.len())];
-
-                    if let DisassemblyLine::Instruction { comments, .. } = &mut line {
-                        comments.push(DisassemblyComment::Data(data.to_vec()));
-                    }
-                    break;
-                }
-            }
-
-            if let Some(syms) = symbol_map.get(&address) {
-                for sym in syms {
-                    if let DisassemblyLine::Instruction { comments, .. } = &mut line {
-                        comments.push(DisassemblyComment::MemoryReference((*sym).clone()));
-                    }
-                }
-            }
-        }
-
-        result.push(line);
-    }
-
-    Ok((result, symbols.clone()))
-}
-
-/// Attempt to deduce type of a chunk of memory and print useful information about it
-fn format_data(data: &[u8]) -> String {
-    enum StrType {
-        Str,
-        WStr,
-    }
-
-    let str = {
-        let wide_len = data
-            .chunks(2)
-            .position(|c| c == [0, 0] || !(c[1] == 0 && char::from(c[0]).is_ascii()))
-            .unwrap_or(data.len());
-
-        if wide_len > 5 {
-            let chars = data
-                .chunks(2)
-                .map(|c| u16::from_le_bytes(c.try_into().unwrap()))
-                .take(wide_len)
-                .collect::<Vec<_>>();
-
-            Some((StrType::WStr, Cow::Owned(String::from_utf16_lossy(&chars))))
-        } else {
-            let len = data
-                .iter()
-                .position(|c| *c == 0 || !char::from(*c).is_ascii())
-                .unwrap_or(data.len());
-
-            if len > 5 {
-                Some((StrType::Str, String::from_utf8_lossy(&data[..len])))
-            } else {
-                None
-            }
-        }
-    };
-
-    let data = if let Some((t, str)) = str {
-        colors::data_string(format!(
-            "{}{str:?}",
-            match t {
-                StrType::Str => "",
-                StrType::WStr => "L",
-            }
-        ))
-    } else {
-        let mut output = String::from("[");
-        for b in data {
-            output.push_str(&format!(" {b:02X}"));
-        }
-        output.push(']');
-        colors::data_bytes(output)
-    };
-    format!(" -> {data}")
-}
-
-// Custom formatter output
-struct MyFormatterOutput<'a>(&'a mut String);
-
-impl FormatterOutput for MyFormatterOutput<'_> {
-    fn write(&mut self, text: &str, kind: FormatterTextKind) {
-        //self.0.push_str(&get_color(text, kind).to_string());
-        self.0.push_str(text);
-    }
-}
-
-fn get_color(s: &str, kind: FormatterTextKind) -> ColoredString {
-    match kind {
-        FormatterTextKind::Directive | FormatterTextKind::Keyword => s.bright_yellow(),
-        FormatterTextKind::Prefix | FormatterTextKind::Mnemonic => s.bright_red(),
-        FormatterTextKind::Register => s.bright_blue(),
-        FormatterTextKind::Number => s.bright_cyan(),
-        _ => s.white(),
-    }
-}
-
-mod colors {
-    use colored::{ColoredString, Colorize as _};
-
-    pub fn symbol_function<S: AsRef<str>>(txt: S) -> ColoredString {
-        txt.as_ref().bright_yellow()
-    }
-    pub fn symbol_data<S: AsRef<str>>(txt: S) -> ColoredString {
-        txt.as_ref().bright_cyan()
-    }
-    pub fn data_string<S: AsRef<str>>(txt: S) -> ColoredString {
-        txt.as_ref().bright_red()
-    }
-    pub fn data_bytes<S: AsRef<str>>(txt: S) -> ColoredString {
-        txt.as_ref().bright_cyan()
-    }
 }
 
 // CLI arguments using clap's derive feature
@@ -535,7 +228,7 @@ struct BinaryData {
 impl BinaryData {
     pub fn new(file_path: &Path, pdb_path: Option<&Path>) -> Result<Self, DisassemblerError> {
         let data = fs::read(file_path)?;
-        let file = OwnedFile::try_new(data, |data| File::parse(&*data))?;
+        let file = OwnedFile::try_new(data, |data| File::parse(data))?;
         let obj_file = file.borrow_dependent();
 
         // Load symbols from PDB if available, otherwise from object file
@@ -661,7 +354,7 @@ pub fn disassemble_range(
 
         // Format the instruction address and bytes
         let address = instruction.ip();
-        let start_index = (instruction.ip() - text_address as u64) as usize;
+        let start_index = (instruction.ip() - text_address) as usize;
         let instr_bytes = &text_data[start_index..start_index + instruction.len()];
 
         // Format the instruction
@@ -800,7 +493,7 @@ fn get_initial_disassembly(
                 s.name.contains(symbol_name)
                     || s.demangled
                         .as_ref()
-                        .map_or(false, |d| d.contains(symbol_name))
+                        .is_some_and(|d| d.contains(symbol_name))
             })
             .collect();
 

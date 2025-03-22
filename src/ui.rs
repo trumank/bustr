@@ -22,7 +22,6 @@ use ratatui::{
 use std::{
     error::Error,
     io,
-    path::Path,
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -101,14 +100,9 @@ impl App {
         self.symbols = symbols;
         for sym in &self.symbols {
             self.nucleo.injector().push(sym.clone(), |sym, columns| {
-                columns[0] = sym.demangled.as_deref().unwrap_or(&sym.name).into();
+                columns[0] = sym.display_name().into();
             });
         }
-    }
-
-    pub fn set_file_info(&mut self, file_path: &Path, pdb_path: Option<&Path>) {
-        self.file_path = Some(file_path.to_path_buf());
-        self.pdb_path = pdb_path.map(|p| p.to_path_buf());
     }
 
     pub fn set_current_address(&mut self, address: u64) {
@@ -234,73 +228,39 @@ impl App {
                 if let Some(item) = snapshot.get_matched_item(self.symbol_scroll as u32) {
                     self.set_current_address(item.data.address);
                 }
-            } else {
-                if idx < self.symbols.len() {
-                    // idk what this index is. symbol array? search view?
-                    self.selected_symbol_index = Some(idx);
+            } else if idx < self.symbols.len() {
+                // idk what this index is. symbol array? search view?
+                self.selected_symbol_index = Some(idx);
 
-                    let symbol = &self.symbols[idx];
-                    self.set_current_address(symbol.address);
+                let symbol = &self.symbols[idx];
+                self.set_current_address(symbol.address);
 
-                    //self.active_pane = Pane::Disassembly;
-                }
+                //self.active_pane = Pane::Disassembly;
             }
         }
     }
 
     fn find_previous_address(&self) -> Option<u64> {
-        if let Some(first_instr) = self.disassembly.iter().find_map(|line| {
-            if let DisassemblyLine::Instruction { address, .. } = line {
-                Some(address)
-            } else {
-                None
-            }
-        }) {
-            Some(first_instr.saturating_sub(4))
-        } else {
-            None
-        }
+        self.disassembly
+            .iter()
+            .find_map(|line| match line {
+                DisassemblyLine::Instruction { address, .. } => Some(address),
+                _ => None,
+            })
+            .map(|first_instr| first_instr.saturating_sub(4))
     }
 
     fn find_next_address(&self) -> Option<u64> {
-        if let Some(last_instr) = self.disassembly.iter().rev().find_map(|line| {
-            if let DisassemblyLine::Instruction { address, bytes, .. } = line {
-                Some((*address, bytes.len() as u64))
-            } else {
-                None
-            }
-        }) {
-            Some(last_instr.0 + last_instr.1)
-        } else {
-            None
-        }
-    }
-
-    pub fn half_page_up(&mut self) {
-        let page_size = if let Some(height) = self.get_visible_height() {
-            height / 2
-        } else {
-            10 // Default if we can't determine height
-        };
-
-        self.page_up(page_size);
-    }
-
-    pub fn half_page_down(&mut self) {
-        let page_size = if let Some(height) = self.get_visible_height() {
-            height / 2
-        } else {
-            10 // Default if we can't determine height
-        };
-
-        self.page_down(page_size);
-    }
-
-    // Helper to get the visible height (used for half-page scrolling)
-    fn get_visible_height(&self) -> Option<usize> {
-        // This is a placeholder - in the run_app function we'll pass the actual height
-        // For now, return a reasonable default
-        Some(20)
+        self.disassembly
+            .iter()
+            .rev()
+            .find_map(|line| match line {
+                DisassemblyLine::Instruction { address, bytes, .. } => {
+                    Some((*address, bytes.len() as u64))
+                }
+                _ => None,
+            })
+            .map(|last_instr| last_instr.0 + last_instr.1)
     }
 
     // Method to jump to the top of the current pane
@@ -547,12 +507,6 @@ fn ui(f: &mut Frame, app: &App) {
         .map(|line| match line {
             DisassemblyLine::Empty => ListItem::new(""),
             DisassemblyLine::Symbol(symbol) => {
-                let name = if let Some(n) = &symbol.demangled {
-                    n
-                } else {
-                    &symbol.name
-                };
-
                 let style = match symbol.kind {
                     SymbolKind::Function => Style::default().fg(Color::Yellow),
                     SymbolKind::Data => Style::default().fg(Color::Cyan),
@@ -560,7 +514,7 @@ fn ui(f: &mut Frame, app: &App) {
 
                 ListItem::new(Line::from(vec![
                     Span::styled(" ; ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(name, style),
+                    Span::styled(symbol.display_name(), style),
                 ]))
             }
             DisassemblyLine::Text(text) => ListItem::new(Line::from(vec![Span::styled(
@@ -620,27 +574,23 @@ fn ui(f: &mut Frame, app: &App) {
                                     "-> ",
                                     Style::default().fg(Color::DarkGray),
                                 ));
-                                let name = if let Some(n) = &sym.demangled {
-                                    n
-                                } else {
-                                    &sym.name
-                                };
-                                spans.push(Span::styled(name, Style::default().fg(Color::Yellow)));
+                                spans.push(Span::styled(
+                                    sym.display_name(),
+                                    Style::default().fg(Color::Yellow),
+                                ));
                             }
                             DisassemblyComment::MemoryReference(sym) => {
                                 spans.push(Span::styled(
                                     "ref ",
                                     Style::default().fg(Color::DarkGray),
                                 ));
-                                let name = if let Some(n) = &sym.demangled {
-                                    n
-                                } else {
-                                    &sym.name
-                                };
-                                spans.push(Span::styled(name, Style::default().fg(Color::Yellow)));
+                                spans.push(Span::styled(
+                                    sym.display_name(),
+                                    Style::default().fg(Color::Yellow),
+                                ));
                             }
                             DisassemblyComment::Data(data) => {
-                                spans.push(format_data_spans(&data));
+                                spans.push(format_data_spans(data));
                             }
                         }
                     }
@@ -714,11 +664,7 @@ fn ui(f: &mut Frame, app: &App) {
             .map(|item| {
                 let symbol = item.data;
 
-                let name = if let Some(n) = &symbol.demangled {
-                    n
-                } else {
-                    &symbol.name
-                };
+                let name = symbol.display_name();
 
                 // Highlight matching parts if there's a search query
                 if app.search_query.is_empty() {
@@ -881,7 +827,8 @@ fn highlight_operands(operands: &str) -> Vec<Span<'static>> {
             .contains(&part.as_str())
         {
             spans.push(Span::styled(part, Style::default().fg(Color::Blue)));
-        } else if part.starts_with("0x") || part.chars().next().map_or(false, |c| c.is_digit(10)) {
+        } else if part.starts_with("0x") || part.chars().next().is_some_and(|c| c.is_ascii_digit())
+        {
             spans.push(Span::styled(part, Style::default().fg(Color::Cyan)));
         } else {
             spans.push(Span::raw(part));
