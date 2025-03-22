@@ -578,45 +578,28 @@ pub fn disassemble_range(
     let obj_file = &binary_data.file.borrow_dependent();
 
     // Find the section containing the address
-    let mut section_found = false;
     let mut text_section = None;
 
     for section in obj_file.sections() {
         let sec_address = section.address();
-        let sec_size = section.size();
-        let mem_range = sec_address..(sec_address + sec_size);
+        let sec_size = section.data()?.len();
+        let mem_range = sec_address..(sec_address + sec_size as u64);
 
         if mem_range.contains(&address) {
             text_section = Some(section);
-            section_found = true;
             break;
         }
     }
 
-    if !section_found {
+    let Some(section) = text_section else {
         return Ok(vec![]);
-    }
-
-    let text_section =
-        text_section.ok_or_else(|| DisassemblerError::Format("Text section not found".into()))?;
-
-    let text_data = text_section.data()?;
-    let text_address = text_section.address();
-
-    // Calculate offset within section
-    let offset = if address >= text_address {
-        (address - text_address) as usize
-    } else {
-        0
     };
 
-    // Make sure we don't go past the end of the section
-    if offset >= text_data.len() {
-        return Err(DisassemblerError::Format(format!(
-            "Address 0x{:X} is outside of section bounds",
-            address
-        )));
-    }
+    let text_data = section.data()?;
+    let text_address = section.address();
+
+    // Calculate offset within section
+    let offset = (address - text_address) as usize;
 
     // Determine how many bytes to disassemble
     // We'll disassemble more than needed to ensure we have enough lines
@@ -662,9 +645,14 @@ pub fn disassemble_range(
             result.push(DisassemblyLine::Empty);
             line_count += 1;
 
-            for sym in syms {
+            let mut iter = syms.iter();
+            for sym in iter.by_ref().take(10) {
                 result.push(DisassemblyLine::Symbol(sym.clone()));
                 line_count += 1;
+            }
+            let count = iter.count();
+            if count > 0 {
+                result.push(DisassemblyLine::Text(format!(" ; ...{count} more")));
             }
 
             result.push(DisassemblyLine::Empty);
