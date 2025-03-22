@@ -1,4 +1,4 @@
-use crate::{DisassemblerError, DisassemblyComment, DisassemblyLine, SymbolInfo, SymbolKind};
+use crate::{BinaryData, DisassemblyComment, DisassemblyLine, SymbolInfo, SymbolKind};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
     execute,
@@ -35,6 +35,7 @@ pub struct App {
     pub file_path: Option<PathBuf>,
     pub pdb_path: Option<PathBuf>,
     pub needs_refresh: bool,
+    pub binary_data: Option<BinaryData>,
 }
 
 #[derive(PartialEq)]
@@ -66,6 +67,7 @@ impl App {
             file_path: None,
             pdb_path: None,
             needs_refresh: false,
+            binary_data: None,
         }
     }
 
@@ -85,6 +87,10 @@ impl App {
     pub fn set_current_address(&mut self, address: u64) {
         self.current_address = address;
         self.needs_refresh = true;
+    }
+
+    pub fn set_binary_data(&mut self, binary_data: BinaryData) {
+        self.binary_data = Some(binary_data);
     }
 
     pub fn scroll_up(&mut self) {
@@ -239,17 +245,12 @@ pub fn run_app<B: Backend>(
     let mut last_tick = Instant::now();
     loop {
         if app.needs_refresh {
-            if let (Some(file_path), Some(height)) = (
-                &app.file_path,
+            if let (Some(height), Some(binary_data)) = (
                 terminal.size().ok().map(|s| s.height as usize),
+                &app.binary_data,
             ) {
-                match crate::disassemble_range(
-                    file_path,
-                    app.pdb_path.as_deref(),
-                    app.current_address,
-                    height,
-                ) {
-                    Ok((disassembly, _)) => {
+                match crate::disassemble_range(binary_data, app.current_address, height) {
+                    Ok(disassembly) => {
                         app.set_disassembly(disassembly);
                         app.current_scroll = 0;
                         app.disassembly_state.select(Some(0));
@@ -325,6 +326,10 @@ fn ui(f: &mut Frame, app: &App) {
                     Span::styled(name, style),
                 ]))
             }
+            DisassemblyLine::Text(text) => ListItem::new(Line::from(vec![Span::styled(
+                text,
+                Style::default().fg(Color::White),
+            )])),
             DisassemblyLine::Instruction {
                 address,
                 bytes,
@@ -398,7 +403,7 @@ fn ui(f: &mut Frame, app: &App) {
                                 spans.push(Span::styled(name, Style::default().fg(Color::Yellow)));
                             }
                             DisassemblyComment::Data(data) => {
-                                spans.push(format_data_spans(data));
+                                spans.push(format_data_spans(&data));
                             }
                         }
                     }

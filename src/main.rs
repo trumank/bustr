@@ -490,6 +490,7 @@ fn parse_hex_address(s: &str) -> Result<u64, String> {
 pub enum DisassemblyLine {
     Empty,
     Symbol(SymbolInfo),
+    Text(String),
     Instruction {
         address: u64,
         bytes: Vec<u8>,
@@ -514,32 +515,66 @@ impl FormatterOutput for PlainFormatterOutput<'_> {
     }
 }
 
-// Add a new function to disassemble a specific range based on address
+self_cell::self_cell!(
+    struct OwnedFile {
+        owner: Vec<u8>,
+
+        #[covariant]
+        dependent: File,
+    }
+);
+
+// Add a new struct to hold the binary data
+struct BinaryData {
+    pub file: OwnedFile,
+    pub symbols: Vec<SymbolInfo>,
+    pub symbol_map: HashMap<u64, Vec<SymbolInfo>>,
+}
+
+impl BinaryData {
+    pub fn new(file_path: &Path, pdb_path: Option<&Path>) -> Result<Self, DisassemblerError> {
+        let data = fs::read(file_path)?;
+        let file = OwnedFile::try_new(data, |data| File::parse(&*data))?;
+        let obj_file = file.borrow_dependent();
+
+        // Load symbols from PDB if available, otherwise from object file
+        let mut symbols = if let Some(pdb) = pdb_path {
+            load_pdb_symbols(obj_file.relative_address_base(), pdb)?
+        } else {
+            load_object_symbols(file_path)?
+        };
+
+        // Sort symbols by address for binary search
+        symbols.sort_by_key(|s| s.address);
+
+        // Create a map for quick symbol lookup
+        let mut symbol_map: HashMap<u64, Vec<SymbolInfo>> = HashMap::new();
+        for symbol in &symbols {
+            symbol_map
+                .entry(symbol.address)
+                .or_default()
+                .push(symbol.clone());
+        }
+
+        Ok(Self {
+            file,
+            symbols,
+            symbol_map,
+        })
+    }
+
+    pub fn get_symbols_at_address(&self, address: u64) -> Option<&Vec<SymbolInfo>> {
+        self.symbol_map.get(&address)
+    }
+}
+
+// Update the disassemble_range function to use the BinaryData
 pub fn disassemble_range(
-    file_path: &Path,
-    pdb_path: Option<&Path>,
+    binary_data: &BinaryData,
     address: u64,
     visible_lines: usize,
-) -> Result<(Vec<DisassemblyLine>, Vec<SymbolInfo>), DisassemblerError> {
-    // Most of the code is similar to disassemble_to_vec, but with some adjustments
-    let data = fs::read(file_path)?;
-    let obj_file = File::parse(&*data)?;
-
-    // Load symbols
-    let mut symbols = if let Some(pdb) = pdb_path {
-        load_pdb_symbols(obj_file.relative_address_base(), pdb)?
-    } else {
-        load_object_symbols(file_path)?
-    };
-
-    // Sort symbols by address for binary search
-    symbols.sort_by_key(|s| s.address);
-
-    // Create a map for quick symbol lookup
-    let mut symbol_map: HashMap<u64, Vec<&SymbolInfo>> = HashMap::new();
-    for symbol in &symbols {
-        symbol_map.entry(symbol.address).or_default().push(symbol);
-    }
+) -> Result<Vec<DisassemblyLine>, DisassemblerError> {
+    let obj_file = &binary_data.file.borrow_dependent();
 
     // Find the section containing the address
     let mut section_found = false;
@@ -623,12 +658,12 @@ pub fn disassemble_range(
         // Check if instruction address matches a known symbol
         let instr_address = instruction.ip();
 
-        if let Some(syms) = symbol_map.get(&instr_address) {
+        if let Some(syms) = binary_data.get_symbols_at_address(instr_address) {
             result.push(DisassemblyLine::Empty);
             line_count += 1;
 
             for sym in syms {
-                result.push(DisassemblyLine::Symbol((*sym).clone()));
+                result.push(DisassemblyLine::Symbol(sym.clone()));
                 line_count += 1;
             }
 
@@ -656,10 +691,10 @@ pub fn disassemble_range(
         // Add branch target comments if applicable
         let target = instruction.near_branch_target();
         if target != 0 {
-            if let Some(syms) = symbol_map.get(&target) {
+            if let Some(syms) = binary_data.get_symbols_at_address(target) {
                 for sym in syms {
                     if let DisassemblyLine::Instruction { comments, .. } = &mut line {
-                        comments.push(DisassemblyComment::BranchTarget((*sym).clone()));
+                        comments.push(DisassemblyComment::BranchTarget(sym.clone()));
                     }
                 }
             }
@@ -684,10 +719,10 @@ pub fn disassemble_range(
                 }
             }
 
-            if let Some(syms) = symbol_map.get(&address) {
+            if let Some(syms) = binary_data.get_symbols_at_address(address) {
                 for sym in syms {
                     if let DisassemblyLine::Instruction { comments, .. } = &mut line {
-                        comments.push(DisassemblyComment::MemoryReference((*sym).clone()));
+                        comments.push(DisassemblyComment::MemoryReference(sym.clone()));
                     }
                 }
             }
@@ -697,9 +732,10 @@ pub fn disassemble_range(
         line_count += 1;
     }
 
-    Ok((result, symbols))
+    Ok(result)
 }
 
+// Update the main function to load the binary data once
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Cli::parse();
 
@@ -712,45 +748,24 @@ fn main() -> Result<(), Box<dyn Error>> {
         None
     };
 
-    // Get initial disassembly and symbols
-    let (disassembly, symbols) = match disassemble_to_vec(
-        &args.input,
-        pdb,
-        args.address,
-        args.symbol.clone(),
-        args.length,
-    ) {
-        Ok(result) => result,
+    // Load the binary data once
+    let binary_data = match BinaryData::new(&args.input, pdb) {
+        Ok(data) => data,
         Err(e) => {
-            eprintln!("Error: {}", e);
+            eprintln!("Error loading binary: {}", e);
             return Err(Box::new(e));
         }
     };
 
-    // Get the starting address
-    let start_address = if let Some(addr) = args.address {
-        addr
-    } else if !disassembly.is_empty() {
-        // Get the address of the first instruction
-        match &disassembly[0] {
-            DisassemblyLine::Instruction { address, .. } => *address,
-            _ => {
-                // Find the first instruction
-                disassembly
-                    .iter()
-                    .find_map(|line| {
-                        if let DisassemblyLine::Instruction { address, .. } = line {
-                            Some(*address)
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or(0)
+    // Get initial disassembly
+    let (disassembly, start_address) =
+        match get_initial_disassembly(&binary_data, args.address, args.symbol.as_deref()) {
+            Ok(result) => result,
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                return Err(Box::new(e));
             }
-        }
-    } else {
-        0
-    };
+        };
 
     // Set up the terminal UI
     let mut terminal = setup_terminal()?;
@@ -758,8 +773,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Create and initialize the app
     let mut app = App::new();
     app.set_disassembly(disassembly);
-    app.set_symbols(symbols);
-    app.set_file_info(&args.input, pdb);
+    app.set_symbols(binary_data.symbols.clone());
+    app.set_binary_data(binary_data);
     app.set_current_address(start_address);
 
     // Run the app
@@ -776,4 +791,63 @@ fn main() -> Result<(), Box<dyn Error>> {
         // This shouldn't happen, but just in case
         Err("Application terminated unexpectedly".into())
     }
+}
+
+// Helper function to get the initial disassembly and starting address
+fn get_initial_disassembly(
+    binary_data: &BinaryData,
+    address: Option<u64>,
+    symbol: Option<&str>,
+) -> Result<(Vec<DisassemblyLine>, u64), DisassemblerError> {
+    let start_address = if let Some(addr) = address {
+        addr
+    } else if let Some(symbol_name) = symbol {
+        // Find symbol by name
+        let matches: Vec<_> = binary_data
+            .symbols
+            .iter()
+            .filter(|s| {
+                s.name.contains(symbol_name)
+                    || s.demangled
+                        .as_ref()
+                        .map_or(false, |d| d.contains(symbol_name))
+            })
+            .collect();
+
+        match matches.len() {
+            0 => {
+                return Err(DisassemblerError::Format(format!(
+                    "No symbols matching {symbol_name:?} found"
+                )));
+            }
+            1 => matches[0].address,
+            _ => {
+                // Multiple matches - return a list of matching symbols as disassembly lines
+                let mut lines = Vec::new();
+                lines.push(DisassemblyLine::Empty);
+                lines.push(DisassemblyLine::Text(format!(
+                    "Found multiple matches for {symbol_name:?}:"
+                )));
+
+                for sym in &matches {
+                    lines.push(DisassemblyLine::Text(format!(
+                        "{:X}: {}",
+                        sym.address,
+                        sym.demangled.as_ref().unwrap_or(&sym.name)
+                    )));
+                }
+
+                // Return the first match's address
+                return Ok((lines, matches[0].address));
+            }
+        }
+    } else {
+        // Default to the entry point or first section
+        binary_data.file.borrow_dependent().entry()
+    };
+
+    // Disassemble from the starting address
+    let disassembly = disassemble_range(binary_data, start_address, 30)?;
+
+    Ok((disassembly, start_address))
 }
