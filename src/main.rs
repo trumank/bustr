@@ -1,4 +1,5 @@
 mod pdb_loader;
+mod ui;
 
 use clap::Parser;
 use colored::{ColoredString, Colorize as _};
@@ -13,7 +14,9 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use std::{error::Error, fmt};
+use ui::{App, restore_terminal, run_app, setup_terminal};
 
 // Custom error type for our disassembler
 #[derive(Debug)]
@@ -56,16 +59,20 @@ impl From<pdb::Error> for DisassemblerError {
 }
 
 // Struct to store symbol information
-struct SymbolInfo {
+#[derive(Clone)]
+pub struct SymbolInfo {
     address: u64,
     name: String,
     demangled: Option<String>,
     kind: SymbolKind,
 }
+
+#[derive(Clone)]
 enum SymbolKind {
     Function,
     Data,
 }
+
 impl SymbolInfo {
     fn display_name(&self) -> ColoredString {
         let txt = if let Some(n) = &self.demangled {
@@ -139,7 +146,7 @@ fn load_object_symbols(object_path: &Path) -> Result<Vec<SymbolInfo>, Disassembl
                 address: symbol.address(),
                 name: symbol.name()?.to_string(),
                 demangled: None,
-                kind: todo!(),
+                kind: SymbolKind::Function,
             });
         }
     }
@@ -147,14 +154,14 @@ fn load_object_symbols(object_path: &Path) -> Result<Vec<SymbolInfo>, Disassembl
     Ok(symbols)
 }
 
-// Function to disassemble a binary file
-fn disassemble(
+// Function to disassemble a binary file and return the disassembly as a vector of strings
+fn disassemble_to_vec(
     file_path: &Path,
     pdb_path: Option<&Path>,
-    mut start_address: Option<u64>,
+    start_address: Option<u64>,
     symbol: Option<String>,
     length: Option<usize>,
-) -> Result<(), DisassemblerError> {
+) -> Result<(Vec<String>, Vec<SymbolInfo>), DisassemblerError> {
     // Read the executable file
     let data = fs::read(file_path)?;
     let obj_file = File::parse(&*data)?;
@@ -166,25 +173,29 @@ fn disassemble(
         load_object_symbols(file_path)?
     };
 
-    if let Some(symbol) = symbol {
+    let mut start_addr = start_address;
+
+    if let Some(symbol_name) = symbol {
         let matches: Vec<_> = symbols
             .iter()
-            .filter(|s| s.display_name().contains(&symbol))
+            .filter(|s| s.display_name().contains(&symbol_name))
             .collect();
         match &matches[..] {
             [] => {
-                println!("No symbols matching {symbol:?} found");
-                return Ok(());
+                return Err(DisassemblerError::Format(format!(
+                    "No symbols matching {symbol_name:?} found"
+                )));
             }
             [symbol] => {
-                start_address = Some(symbol.address);
+                start_addr = Some(symbol.address);
             }
             symbols => {
-                println!("Found multiple matches for {symbol:?}:");
+                let mut result = Vec::new();
+                result.push(format!("Found multiple matches for {symbol_name:?}:"));
                 for sym in symbols {
-                    println!("{:X} {}", sym.address, sym.display_name());
+                    result.push(format!("{:X} {}", sym.address, sym.display_name()));
                 }
-                return Ok(());
+                return Ok((result, Vec::new()));
             }
         }
     }
@@ -198,7 +209,7 @@ fn disassemble(
         symbol_map.entry(symbol.address).or_default().push(symbol);
     }
 
-    let text_section = if let Some(start_address) = start_address {
+    let text_section = if let Some(start_address) = start_addr {
         let mut ret_section = None;
         for section in obj_file.sections() {
             let sec_address = section.address();
@@ -235,7 +246,7 @@ fn disassemble(
     };
 
     // Calculate the range to disassemble
-    let start = start_address.unwrap_or(0);
+    let start = start_addr.unwrap_or(0);
     let offset = if start >= text_address {
         (start - text_address) as usize
     } else {
@@ -263,17 +274,15 @@ fn disassemble(
     );
 
     let mut formatter = IntelFormatter::new();
-
-    //formatter.options_mut().set_digit_separator("`");
     formatter.options_mut().set_first_operand_char_index(10);
 
     // Buffer for formatted instructions
-    let mut output = String::new();
+    let mut result = Vec::new();
     let mut instruction = Instruction::default();
 
     // Disassemble instructions
     while decoder.can_decode() {
-        output.clear();
+        let mut output = String::new();
 
         // Decode instruction
         decoder.decode_out(&mut instruction);
@@ -282,58 +291,19 @@ fn disassemble(
         let instr_address = instruction.ip();
 
         if let Some(syms) = symbol_map.get(&instr_address) {
-            println!();
+            result.push(String::new());
             for sym in syms {
-                println!(" ; {}", sym.display_name());
+                result.push(format!(" ; {}", sym.display_name()));
             }
-            println!();
+            result.push(String::new());
         }
 
-        //// Find the symbol that is closest to but not greater than the instruction address
-        //let symbol_name = match symbol_format {
-        //    "inline" => {
-        //        if let Some(name) = symbol_map.get(&instr_address) {
-        //            symbol_found = true;
-        //            format!(" ; <{}>", name)
-        //        } else {
-        //            String::new()
-        //        }
-        //    }
-        //    "full" => {
-        //        // Binary search to find the closest symbol before this address
-        //        match symbols.binary_search_by_key(&instr_address, |s| s.address) {
-        //            Ok(idx) => {
-        //                // Exact match
-        //                symbol_found = true;
-        //                format!("\n{}:\n", symbols[idx].name)
-        //            }
-        //            Err(0) => String::new(), // No symbol before this address
-        //            Err(idx) => {
-        //                // Get the previous symbol
-        //                let prev_symbol = &symbols[idx - 1];
-        //                if instr_address == prev_symbol.address {
-        //                    symbol_found = true;
-        //                    format!("\n{}:\n", prev_symbol.name)
-        //                } else {
-        //                    String::new()
-        //                }
-        //            }
-        //        }
-        //    }
-        //    _ => String::new(),
-        //};
-
-        //// Only print symbol headers for the first instruction at that address
-        //if symbol_found {
-        //    output.push_str(&symbol_name);
-        //}
-
         // Format the instruction address
-        print!("{:016X} ", instruction.ip());
+        output.push_str(&format!("{:016X} ", instruction.ip()));
         let start_index = (instruction.ip() - text_address as u64) as usize;
         let instr_bytes = &text_data[start_index..start_index + instruction.len()];
         for b in instr_bytes.iter() {
-            print!("{:02X} ", b);
+            output.push_str(&format!("{:02X} ", b));
         }
 
         // Pad for alignment
@@ -381,14 +351,10 @@ fn disassemble(
             }
         }
 
-        println!("{}", output);
-        //output.push('\n');
+        result.push(output);
     }
 
-    // Print the disassembly
-    //println!("{}", output);
-
-    Ok(())
+    Ok((result, symbols.clone()))
 }
 
 /// Attempt to deduce type of a chunk of memory and print useful information about it
@@ -450,7 +416,8 @@ struct MyFormatterOutput<'a>(&'a mut String);
 
 impl FormatterOutput for MyFormatterOutput<'_> {
     fn write(&mut self, text: &str, kind: FormatterTextKind) {
-        self.0.push_str(&get_color(text, kind).to_string());
+        //self.0.push_str(&get_color(text, kind).to_string());
+        self.0.push_str(text);
     }
 }
 
@@ -521,12 +488,47 @@ fn main() -> Result<(), Box<dyn Error>> {
     let adj_pdb = args.input.with_extension("pdb");
     let pdb = if let Some(pdb) = args.pdb.as_deref() {
         Some(pdb)
-    } else if std::fs::exists(&adj_pdb)? {
+    } else if adj_pdb.exists() {
         Some(adj_pdb.as_ref())
     } else {
         None
     };
 
-    disassemble(&args.input, pdb, args.address, args.symbol, args.length)
-        .map_err(|e| Box::new(e) as Box<dyn Error>)
+    // Get the disassembly as a vector of strings
+    let (disassembly, symbols) = match disassemble_to_vec(
+        &args.input,
+        pdb,
+        args.address,
+        args.symbol.clone(),
+        args.length,
+    ) {
+        Ok(result) => result,
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            return Err(Box::new(e));
+        }
+    };
+
+    // Set up the terminal UI
+    let mut terminal = setup_terminal()?;
+
+    // Create and initialize the app
+    let mut app = App::new();
+    app.set_disassembly(disassembly);
+    app.set_symbols(symbols);
+
+    // Run the app
+    let tick_rate = Duration::from_millis(250);
+    let app = run_app(&mut terminal, app, tick_rate)?;
+
+    // Restore terminal
+    restore_terminal(&mut terminal)?;
+
+    // If the app should quit, exit normally
+    if app.should_quit {
+        Ok(())
+    } else {
+        // This shouldn't happen, but just in case
+        Err("Application terminated unexpectedly".into())
+    }
 }
