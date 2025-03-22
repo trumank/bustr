@@ -342,10 +342,28 @@ fn disassemble(
         symbol_map.entry(symbol.address).or_default().push(symbol);
     }
 
-    // Find the .text section
-    let text_section = obj_file
-        .section_by_name(".text")
-        .ok_or_else(|| DisassemblerError::FormatError("Text section not found".into()))?;
+    let text_section = if let Some(start_address) = start_address {
+        let mut ret_section = None;
+        for section in obj_file.sections() {
+            let sec_address = section.address();
+            let sec_data = section.data()?;
+            let mem_range = sec_address..sec_address + sec_data.len() as u64;
+            if mem_range.contains(&start_address) {
+                ret_section = Some(section);
+                break;
+            }
+        }
+        ret_section.ok_or_else(|| {
+            DisassemblerError::FormatError(format!(
+                "No sections contain address 0x{start_address:X}"
+            ))
+        })
+    } else {
+        // Find the .text section
+        obj_file
+            .section_by_name(".text")
+            .ok_or_else(|| DisassemblerError::FormatError("Text section not found".into()))
+    }?;
 
     let text_data = text_section.data()?;
     let text_address = text_section.address();
