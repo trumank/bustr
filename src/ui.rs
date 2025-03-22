@@ -10,7 +10,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 use std::{
     error::Error,
@@ -27,6 +27,8 @@ pub struct App {
     pub show_help: bool,
     pub should_quit: bool,
     pub active_pane: Pane,
+    pub disassembly_state: ListState,
+    pub symbol_state: ListState,
 }
 
 #[derive(PartialEq)]
@@ -37,6 +39,12 @@ pub enum Pane {
 
 impl App {
     pub fn new() -> Self {
+        let mut disassembly_state = ListState::default();
+        disassembly_state.select(Some(0));
+
+        let mut symbol_state = ListState::default();
+        symbol_state.select(Some(0));
+
         Self {
             disassembly: Vec::new(),
             symbols: Vec::new(),
@@ -46,6 +54,8 @@ impl App {
             show_help: false,
             should_quit: false,
             active_pane: Pane::Disassembly,
+            disassembly_state,
+            symbol_state,
         }
     }
 
@@ -62,11 +72,13 @@ impl App {
             Pane::Disassembly => {
                 if self.current_scroll > 0 {
                     self.current_scroll -= 1;
+                    self.disassembly_state.select(Some(self.current_scroll));
                 }
             }
             Pane::Symbols => {
                 if self.symbol_scroll > 0 {
                     self.symbol_scroll -= 1;
+                    self.symbol_state.select(Some(self.symbol_scroll));
                 }
             }
         }
@@ -77,11 +89,13 @@ impl App {
             Pane::Disassembly => {
                 if self.current_scroll < self.disassembly.len().saturating_sub(1) {
                     self.current_scroll += 1;
+                    self.disassembly_state.select(Some(self.current_scroll));
                 }
             }
             Pane::Symbols => {
                 if self.symbol_scroll < self.symbols.len().saturating_sub(1) {
                     self.symbol_scroll += 1;
+                    self.symbol_state.select(Some(self.symbol_scroll));
                 }
             }
         }
@@ -91,9 +105,11 @@ impl App {
         match self.active_pane {
             Pane::Disassembly => {
                 self.current_scroll = self.current_scroll.saturating_sub(page_size);
+                self.disassembly_state.select(Some(self.current_scroll));
             }
             Pane::Symbols => {
                 self.symbol_scroll = self.symbol_scroll.saturating_sub(page_size);
+                self.symbol_state.select(Some(self.symbol_scroll));
             }
         }
     }
@@ -103,10 +119,12 @@ impl App {
             Pane::Disassembly => {
                 let max = self.disassembly.len().saturating_sub(1);
                 self.current_scroll = (self.current_scroll + page_size).min(max);
+                self.disassembly_state.select(Some(self.current_scroll));
             }
             Pane::Symbols => {
                 let max = self.symbols.len().saturating_sub(1);
                 self.symbol_scroll = (self.symbol_scroll + page_size).min(max);
+                self.symbol_state.select(Some(self.symbol_scroll));
             }
         }
     }
@@ -189,7 +207,7 @@ fn ui(f: &mut Frame, app: &App) {
     let disassembly_list = List::new(disassembly_items)
         .block(
             Block::default()
-                .title("Disassembly")
+                .title(format!("Disassembly ({} lines)", app.disassembly.len()))
                 .borders(Borders::ALL)
                 .border_style(if app.active_pane == Pane::Disassembly {
                     Style::default().fg(Color::Yellow)
@@ -202,12 +220,17 @@ fn ui(f: &mut Frame, app: &App) {
     f.render_stateful_widget(
         disassembly_list,
         chunks[0],
-        &mut ratatui::widgets::ListState::default().with_selected(Some(app.current_scroll)),
+        &mut app.disassembly_state.clone(),
     );
 
-    // Symbols pane
-    let symbol_items: Vec<ListItem> = app
-        .symbols
+    // Symbols pane - Lazy loading implementation
+    // Calculate visible range based on terminal height
+    let symbols_height = chunks[1].height as usize - 2; // Subtract 2 for borders
+    let start_idx = app.symbol_scroll.saturating_sub(symbols_height / 2);
+    let end_idx = (start_idx + symbols_height).min(app.symbols.len());
+
+    // Only create ListItems for visible symbols
+    let symbol_items: Vec<ListItem> = app.symbols[start_idx..end_idx]
         .iter()
         .map(|symbol| {
             let name = if let Some(n) = &symbol.demangled {
@@ -222,7 +245,7 @@ fn ui(f: &mut Frame, app: &App) {
     let symbols_list = List::new(symbol_items)
         .block(
             Block::default()
-                .title("Symbols")
+                .title(format!("Symbols ({} total)", app.symbols.len()))
                 .borders(Borders::ALL)
                 .border_style(if app.active_pane == Pane::Symbols {
                     Style::default().fg(Color::Yellow)
@@ -232,11 +255,13 @@ fn ui(f: &mut Frame, app: &App) {
         )
         .highlight_style(Style::default().add_modifier(Modifier::BOLD));
 
-    f.render_stateful_widget(
-        symbols_list,
-        chunks[1],
-        &mut ratatui::widgets::ListState::default().with_selected(Some(app.symbol_scroll)),
-    );
+    // Adjust the state for the visible range
+    let mut symbol_state = app.symbol_state.clone();
+    if app.symbol_scroll >= start_idx && app.symbol_scroll < end_idx {
+        symbol_state.select(Some(app.symbol_scroll - start_idx));
+    }
+
+    f.render_stateful_widget(symbols_list, chunks[1], &mut symbol_state);
 
     // Help overlay
     if app.show_help {
@@ -303,4 +328,3 @@ pub fn restore_terminal(
     terminal.show_cursor()?;
     Ok(())
 }
-
