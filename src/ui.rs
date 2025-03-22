@@ -10,9 +10,13 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use nucleo::pattern::{CaseMatching, Normalization};
-use object::{Object, ObjectSection as _};
 use ratatui::{
-    backend::{Backend, CrosstermBackend}, layout::{Constraint, Direction, Layout}, style::{Color, Modifier, Style, Stylize}, text::{Line, Span, Text}, widgets::{Block, Borders, List, ListItem, ListState, Paragraph}, Frame, Terminal
+    Frame, Terminal,
+    backend::{Backend, CrosstermBackend},
+    layout::{Constraint, Direction, Layout},
+    style::{Color, Modifier, Style},
+    text::{Line, Span, Text},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 use std::{
     error::Error,
@@ -21,7 +25,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub struct App {
+pub struct App<'data> {
     pub disassembly: Vec<DisassemblyLine>,
     pub symbols: Vec<SymbolInfo>,
     pub current_scroll: usize,
@@ -39,7 +43,7 @@ pub struct App {
     pub file_path: Option<PathBuf>,
     pub pdb_path: Option<PathBuf>,
     pub needs_refresh: bool,
-    pub binary_data: Option<BinaryData>,
+    pub binary_data: Option<BinaryData<'data>>,
     pub search_query: String,
     nucleo: nucleo::Nucleo<SymbolInfo>,
 }
@@ -50,7 +54,7 @@ pub enum Pane {
     Symbols,
 }
 
-impl App {
+impl<'data> App<'data> {
     pub fn new() -> Self {
         let mut disassembly_state = ListState::default();
         disassembly_state.select(Some(0));
@@ -105,7 +109,7 @@ impl App {
         self.needs_refresh = true;
     }
 
-    pub fn set_binary_data(&mut self, binary_data: BinaryData) {
+    pub fn set_binary_data(&mut self, binary_data: BinaryData<'data>) {
         self.binary_data = Some(binary_data);
     }
 
@@ -300,45 +304,18 @@ impl App {
 
     // Helper to find the first address in the binary
     fn find_first_address(&self) -> Option<u64> {
-        if let Some(binary_data) = &self.binary_data {
-            // Find the first section in the binary
-            let obj_file = binary_data.file.borrow_dependent();
-
-            // Otherwise, find the first section
-            let mut first_addr = None;
-            for section in obj_file.sections() {
-                if section.size() > 0 {
-                    let addr = section.address();
-                    if first_addr.is_none() || addr < first_addr.unwrap() {
-                        first_addr = Some(addr);
-                    }
-                }
-            }
-
-            return first_addr;
-        }
-        None
+        self.binary_data
+            .as_ref()
+            .and_then(|b| b.file.memory.sections().next())
+            .map(|s| s.address() as u64)
     }
 
     // Helper to find the last address in the binary
     fn find_last_address(&self) -> Option<u64> {
-        if let Some(binary_data) = &self.binary_data {
-            // Find the last section in the binary
-            let obj_file = binary_data.file.borrow_dependent();
-
-            let mut last_addr = None;
-            for section in obj_file.sections() {
-                if section.size() > 0 {
-                    let addr = section.address() + section.size() - 1;
-                    if last_addr.is_none() || addr > last_addr.unwrap() {
-                        last_addr = Some(addr);
-                    }
-                }
-            }
-
-            return last_addr;
-        }
-        None
+        self.binary_data
+            .as_ref()
+            .and_then(|b| b.file.memory.sections().last())
+            .map(|s| (s.address() + s.data().len()) as u64)
     }
 
     // Add methods for search functionality
@@ -388,11 +365,11 @@ impl App {
     }
 }
 
-pub fn run_app<B: Backend>(
+pub fn run_app<'data, B: Backend>(
     terminal: &mut Terminal<B>,
-    mut app: App,
+    mut app: App<'data>,
     tick_rate: Duration,
-) -> io::Result<App> {
+) -> io::Result<App<'data>> {
     let mut last_tick = Instant::now();
     loop {
         if app.needs_refresh {

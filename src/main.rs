@@ -7,7 +7,7 @@ use iced_x86::{
     Decoder, DecoderOptions, Formatter, FormatterOutput, FormatterTextKind, Instruction,
     IntelFormatter,
 };
-use object::{File, Object, ObjectSection, ObjectSymbol};
+use patternsleuth_image::image::{Image, ImageBuilder};
 use pdb::{FallibleIterator, PDB, SymbolData};
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -21,7 +21,6 @@ use ui::{App, restore_terminal, run_app, setup_terminal};
 #[derive(Debug)]
 pub enum DisassemblerError {
     Io(std::io::Error),
-    Object(object::Error),
     Pdb(pdb::Error),
     Format(String),
 }
@@ -30,7 +29,6 @@ impl fmt::Display for DisassemblerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             DisassemblerError::Io(e) => write!(f, "I/O error: {}", e),
-            DisassemblerError::Object(e) => write!(f, "Object file error: {}", e),
             DisassemblerError::Pdb(e) => write!(f, "PDB error: {}", e),
             DisassemblerError::Format(s) => write!(f, "Format error: {}", s),
         }
@@ -42,12 +40,6 @@ impl Error for DisassemblerError {}
 impl From<std::io::Error> for DisassemblerError {
     fn from(err: std::io::Error) -> Self {
         DisassemblerError::Io(err)
-    }
-}
-
-impl From<object::Error> for DisassemblerError {
-    fn from(err: object::Error) -> Self {
-        DisassemblerError::Object(err)
     }
 }
 
@@ -125,26 +117,6 @@ fn load_pdb_symbols(
     Ok(symbols)
 }
 
-// Function to load symbols from object file
-fn load_object_symbols(object_path: &Path) -> Result<Vec<SymbolInfo>, DisassemblerError> {
-    let data = fs::read(object_path)?;
-    let obj_file = File::parse(&*data)?;
-
-    let mut symbols = Vec::new();
-    for symbol in obj_file.symbols() {
-        if symbol.kind() == object::SymbolKind::Text {
-            symbols.push(SymbolInfo {
-                address: symbol.address(),
-                name: symbol.name()?.to_string(),
-                demangled: None,
-                kind: SymbolKind::Function,
-            });
-        }
-    }
-
-    Ok(symbols)
-}
-
 // CLI arguments using clap's derive feature
 #[derive(Parser)]
 #[clap(
@@ -209,33 +181,26 @@ impl FormatterOutput for PlainFormatterOutput<'_> {
     }
 }
 
-self_cell::self_cell!(
-    struct OwnedFile {
-        owner: Vec<u8>,
-
-        #[covariant]
-        dependent: File,
-    }
-);
-
 // Add a new struct to hold the binary data
-struct BinaryData {
-    pub file: OwnedFile,
+struct BinaryData<'data> {
+    pub file: Image<'data>,
     pub symbols: Vec<SymbolInfo>,
     pub symbol_map: HashMap<u64, Vec<SymbolInfo>>,
 }
 
-impl BinaryData {
-    pub fn new(file_path: &Path, pdb_path: Option<&Path>) -> Result<Self, DisassemblerError> {
-        let data = fs::read(file_path)?;
-        let file = OwnedFile::try_new(data, |data| File::parse(data))?;
-        let obj_file = file.borrow_dependent();
+impl<'data> BinaryData<'data> {
+    pub fn new(
+        data: &'data [u8],
+        file_path: &Path,
+        pdb_path: Option<&Path>,
+    ) -> anyhow::Result<Self> {
+        let file = ImageBuilder::default().build(data)?;
 
         // Load symbols from PDB if available, otherwise from object file
         let mut symbols = if let Some(pdb) = pdb_path {
-            load_pdb_symbols(obj_file.relative_address_base(), pdb)?
+            load_pdb_symbols(file.base_address as u64, pdb)?
         } else {
-            load_object_symbols(file_path)?
+            vec![]
         };
 
         // Sort symbols by address for binary search
@@ -268,28 +233,17 @@ pub fn disassemble_range(
     address: u64,
     visible_lines: usize,
 ) -> Result<Vec<DisassemblyLine>, DisassemblerError> {
-    let obj_file = &binary_data.file.borrow_dependent();
-
-    // Find the section containing the address
-    let mut text_section = None;
-
-    for section in obj_file.sections() {
-        let sec_address = section.address();
-        let sec_size = section.data()?.len();
-        let mem_range = sec_address..(sec_address + sec_size as u64);
-
-        if mem_range.contains(&address) {
-            text_section = Some(section);
-            break;
-        }
-    }
-
-    let Some(section) = text_section else {
+    let Some(section) = binary_data
+        .file
+        .memory
+        .get_section_containing(address as usize)
+        .ok()
+    else {
         return Ok(vec![]);
     };
 
-    let text_data = section.data()?;
-    let text_address = section.address();
+    let text_data = section.data();
+    let text_address = section.address() as u64;
 
     // Calculate offset within section
     let offset = (address - text_address) as usize;
@@ -298,21 +252,9 @@ pub fn disassemble_range(
     // We'll disassemble more than needed to ensure we have enough lines
     let end = (offset + visible_lines * 16).min(text_data.len());
 
-    // Determine architecture
-    let architecture = match obj_file.architecture() {
-        object::Architecture::X86_64 => 64,
-        object::Architecture::I386 => 32,
-        arch => {
-            return Err(DisassemblerError::Format(format!(
-                "Unsupported architecture: {:?}",
-                arch
-            )));
-        }
-    };
-
     // Create decoder
     let mut decoder = Decoder::with_ip(
-        architecture,
+        64, // TODO don't assume bitness
         &text_data[offset..end],
         text_address + offset as u64,
         DecoderOptions::NONE,
@@ -385,18 +327,10 @@ pub fn disassemble_range(
         if instruction.is_ip_rel_memory_operand() {
             let address = instruction.ip_rel_memory_address();
 
-            for section in obj_file.sections() {
-                let sec_address = section.address();
-                let sec_data = section.data()?;
-                let mem_range = sec_address..sec_address + sec_data.len() as u64;
-                if mem_range.contains(&address) {
-                    let data = &sec_data[(address - sec_address) as usize
-                        ..((address - sec_address) as usize + 100).min(sec_data.len())];
-
-                    if let DisassemblyLine::Instruction { comments, .. } = &mut line {
-                        comments.push(DisassemblyComment::Data(data.to_vec()));
-                    }
-                    break;
+            if let Ok(data) = binary_data.file.memory.range_from(address as usize..) {
+                let data = &data[..data.len().min(100)];
+                if let DisassemblyLine::Instruction { comments, .. } = &mut line {
+                    comments.push(DisassemblyComment::Data(data.to_vec()));
                 }
             }
 
@@ -431,14 +365,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         None
     };
 
+    let data = std::fs::read(&args.input)?;
+
     // Load the binary data once
-    let binary_data = match BinaryData::new(&args.input, pdb) {
-        Ok(data) => data,
-        Err(e) => {
-            eprintln!("Error loading binary: {}", e);
-            return Err(Box::new(e));
-        }
-    };
+    let binary_data = BinaryData::new(&data, &args.input, pdb)?;
 
     // Get initial disassembly
     let (disassembly, start_address) =
@@ -526,7 +456,7 @@ fn get_initial_disassembly(
         }
     } else {
         // Default to the entry point or first section
-        binary_data.file.borrow_dependent().entry()
+        binary_data.file.base_address as u64
     };
 
     // Disassemble from the starting address
