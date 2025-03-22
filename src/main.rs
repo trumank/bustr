@@ -59,13 +59,22 @@ struct SymbolInfo {
     address: u64,
     name: String,
     demangled: Option<String>,
+    kind: SymbolKind,
+}
+enum SymbolKind {
+    Function,
+    Data,
 }
 impl SymbolInfo {
-    fn display_name(&self) -> &str {
-        if let Some(n) = &self.demangled {
+    fn display_name(&self) -> ColoredString {
+        let txt = if let Some(n) = &self.demangled {
             n
         } else {
             &self.name
+        };
+        match self.kind {
+            SymbolKind::Function => colors::symbol_function(txt),
+            SymbolKind::Data => colors::symbol_data(txt),
         }
     }
 }
@@ -250,6 +259,11 @@ fn load_pdb_symbols(
                     address: image_base + rva.0 as u64,
                     name: data.name.to_string().to_string(),
                     demangled: None,
+                    kind: if data.function {
+                        SymbolKind::Function
+                    } else {
+                        SymbolKind::Data
+                    },
                 });
             }
         } else if let Ok(SymbolData::Procedure(data)) = symbol.parse() {
@@ -258,6 +272,7 @@ fn load_pdb_symbols(
                     address: image_base + rva.0 as u64,
                     name: data.name.to_string().to_string(),
                     demangled: None,
+                    kind: SymbolKind::Function,
                 });
             }
         }
@@ -283,6 +298,7 @@ fn load_object_symbols(object_path: &Path) -> Result<Vec<SymbolInfo>, Disassembl
                 address: symbol.address(),
                 name: symbol.name()?.to_string(),
                 demangled: None,
+                kind: todo!(),
             });
         }
     }
@@ -325,7 +341,7 @@ fn disassemble(
             symbols => {
                 println!("Found multiple matches for {symbol:?}:");
                 for sym in symbols {
-                    println!("{:X} {}", sym.address, colors::symbol(sym.display_name()));
+                    println!("{:X} {}", sym.address, sym.display_name());
                 }
                 return Ok(());
             }
@@ -427,7 +443,7 @@ fn disassemble(
         if let Some(syms) = symbol_map.get(&instr_address) {
             println!();
             for sym in syms {
-                println!(" ; {}", colors::symbol(sym.display_name()));
+                println!(" ; {}", sym.display_name());
             }
             println!();
         }
@@ -493,7 +509,7 @@ fn disassemble(
             if let Some(syms) = symbol_map.get(&target) {
                 output.push_str(" ; -> ");
                 for sym in syms {
-                    output.push_str(&format!(" // {}", colors::symbol(sym.display_name())));
+                    output.push_str(&format!(" // {}", sym.display_name()));
                 }
             }
         }
@@ -513,6 +529,13 @@ fn disassemble(
                     output.push_str("; ");
                     output.push_str(&format_data(data));
                     break;
+                }
+            }
+
+            if let Some(syms) = symbol_map.get(&address) {
+                output.push_str(" ; -> ");
+                for sym in syms {
+                    output.push_str(&format!(" // {}", sym.display_name()));
                 }
             }
         }
@@ -603,8 +626,11 @@ fn get_color(s: &str, kind: FormatterTextKind) -> ColoredString {
 mod colors {
     use colored::{ColoredString, Colorize as _};
 
-    pub fn symbol<S: AsRef<str>>(txt: S) -> ColoredString {
+    pub fn symbol_function<S: AsRef<str>>(txt: S) -> ColoredString {
         txt.as_ref().bright_yellow()
+    }
+    pub fn symbol_data<S: AsRef<str>>(txt: S) -> ColoredString {
+        txt.as_ref().bright_cyan()
     }
     pub fn data_string<S: AsRef<str>>(txt: S) -> ColoredString {
         txt.as_ref().bright_red()
