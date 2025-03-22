@@ -12,25 +12,24 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::{error::Error, fmt};
 
 // Custom error type for our disassembler
 #[derive(Debug)]
 enum DisassemblerError {
-    IoError(std::io::Error),
-    ObjectError(object::Error),
-    PdbError(pdb::Error),
-    FormatError(String),
+    Io(std::io::Error),
+    Object(object::Error),
+    Pdb(pdb::Error),
+    Format(String),
 }
 
 impl fmt::Display for DisassemblerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DisassemblerError::IoError(e) => write!(f, "I/O error: {}", e),
-            DisassemblerError::ObjectError(e) => write!(f, "Object file error: {}", e),
-            DisassemblerError::PdbError(e) => write!(f, "PDB error: {}", e),
-            DisassemblerError::FormatError(s) => write!(f, "Format error: {}", s),
+            DisassemblerError::Io(e) => write!(f, "I/O error: {}", e),
+            DisassemblerError::Object(e) => write!(f, "Object file error: {}", e),
+            DisassemblerError::Pdb(e) => write!(f, "PDB error: {}", e),
+            DisassemblerError::Format(s) => write!(f, "Format error: {}", s),
         }
     }
 }
@@ -39,19 +38,19 @@ impl Error for DisassemblerError {}
 
 impl From<std::io::Error> for DisassemblerError {
     fn from(err: std::io::Error) -> Self {
-        DisassemblerError::IoError(err)
+        DisassemblerError::Io(err)
     }
 }
 
 impl From<object::Error> for DisassemblerError {
     fn from(err: object::Error) -> Self {
-        DisassemblerError::ObjectError(err)
+        DisassemblerError::Object(err)
     }
 }
 
 impl From<pdb::Error> for DisassemblerError {
     fn from(err: pdb::Error) -> Self {
-        DisassemblerError::PdbError(err)
+        DisassemblerError::Pdb(err)
     }
 }
 
@@ -87,7 +86,7 @@ impl std::fmt::Debug for MemmapSourceView {
         f.debug_struct("MemmapSourceView").finish_non_exhaustive()
     }
 }
-impl<'s> pdb::SourceView<'s> for MemmapSourceView {
+impl pdb::SourceView<'_> for MemmapSourceView {
     fn as_slice(&self) -> &[u8] {
         self.data
     }
@@ -354,15 +353,13 @@ fn disassemble(
             }
         }
         ret_section.ok_or_else(|| {
-            DisassemblerError::FormatError(format!(
-                "No sections contain address 0x{start_address:X}"
-            ))
+            DisassemblerError::Format(format!("No sections contain address 0x{start_address:X}"))
         })
     } else {
         // Find the .text section
         obj_file
             .section_by_name(".text")
-            .ok_or_else(|| DisassemblerError::FormatError("Text section not found".into()))
+            .ok_or_else(|| DisassemblerError::Format("Text section not found".into()))
     }?;
 
     let text_data = text_section.data()?;
@@ -373,9 +370,10 @@ fn disassemble(
         object::Architecture::X86_64 => 64,
         object::Architecture::I386 => 32,
         arch => {
-            return Err(DisassemblerError::FormatError(
-                format!("Unsupported architecture: {:?}", arch).into(),
-            ));
+            return Err(DisassemblerError::Format(format!(
+                "Unsupported architecture: {:?}",
+                arch
+            )));
         }
     };
 
@@ -394,7 +392,7 @@ fn disassemble(
     };
 
     if offset >= text_data.len() {
-        return Err(DisassemblerError::FormatError(
+        return Err(DisassemblerError::Format(
             "Start address is outside of text section".into(),
         ));
     }
@@ -493,7 +491,7 @@ fn disassemble(
         let target = instruction.near_branch_target();
         if target != 0 {
             if let Some(syms) = symbol_map.get(&target) {
-                output.push_str(&format!(" ; -> "));
+                output.push_str(" ; -> ");
                 for sym in syms {
                     output.push_str(&format!(" // {}", colors::symbol(sym.display_name())));
                 }
@@ -586,7 +584,7 @@ fn format_data(data: &[u8]) -> String {
 // Custom formatter output
 struct MyFormatterOutput<'a>(&'a mut String);
 
-impl<'a> FormatterOutput for MyFormatterOutput<'a> {
+impl FormatterOutput for MyFormatterOutput<'_> {
     fn write(&mut self, text: &str, kind: FormatterTextKind) {
         self.0.push_str(&get_color(text, kind).to_string());
     }
