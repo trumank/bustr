@@ -1,4 +1,4 @@
-use crate::{DisassemblerError, SymbolInfo};
+use crate::{DisassemblerError, DisassemblyComment, DisassemblyLine, SymbolInfo, SymbolKind};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
     execute,
@@ -19,7 +19,7 @@ use std::{
 };
 
 pub struct App {
-    pub disassembly: Vec<String>,
+    pub disassembly: Vec<DisassemblyLine>,
     pub symbols: Vec<SymbolInfo>,
     pub current_scroll: usize,
     pub symbol_scroll: usize,
@@ -59,7 +59,7 @@ impl App {
         }
     }
 
-    pub fn set_disassembly(&mut self, disassembly: Vec<String>) {
+    pub fn set_disassembly(&mut self, disassembly: Vec<DisassemblyLine>) {
         self.disassembly = disassembly;
     }
 
@@ -197,11 +197,126 @@ fn ui(f: &mut Frame, app: &App) {
         .constraints([Constraint::Percentage(70), Constraint::Percentage(30)].as_ref())
         .split(f.size());
 
-    // Disassembly pane
+    // Disassembly pane - convert structured data to styled text
     let disassembly_items: Vec<ListItem> = app
         .disassembly
         .iter()
-        .map(|line| ListItem::new(line.clone()))
+        .map(|line| {
+            match line {
+                DisassemblyLine::Empty => ListItem::new(""),
+                DisassemblyLine::Symbol(symbol) => {
+                    let name = if let Some(n) = &symbol.demangled {
+                        n
+                    } else {
+                        &symbol.name
+                    };
+
+                    let style = match symbol.kind {
+                        SymbolKind::Function => Style::default().fg(Color::Yellow),
+                        SymbolKind::Data => Style::default().fg(Color::Cyan),
+                    };
+
+                    ListItem::new(Line::from(vec![
+                        Span::styled(" ; ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(name, style),
+                    ]))
+                }
+                DisassemblyLine::Instruction {
+                    address,
+                    bytes,
+                    instruction,
+                    comments,
+                } => {
+                    // Format address
+                    let mut spans = vec![Span::styled(
+                        format!("{:016X} ", address),
+                        Style::default().fg(Color::White),
+                    )];
+
+                    // Format bytes
+                    for b in bytes {
+                        spans.push(Span::styled(
+                            format!("{:02X} ", b),
+                            Style::default().fg(Color::DarkGray),
+                        ));
+                    }
+
+                    // Pad for alignment
+                    for _ in bytes.len()..12 {
+                        spans.push(Span::raw("   "));
+                    }
+
+                    // Format instruction with syntax highlighting
+                    let instr_parts: Vec<&str> = instruction.split_whitespace().collect();
+                    if !instr_parts.is_empty() {
+                        // Mnemonic
+                        spans.push(Span::styled(
+                            instr_parts[0],
+                            Style::default().fg(Color::Red),
+                        ));
+                        spans.push(Span::raw(" "));
+
+                        // Operands
+                        if instr_parts.len() > 1 {
+                            let operands = instr_parts[1..].join(" ");
+                            let operand_spans = highlight_operands(&operands);
+                            spans.extend(operand_spans);
+                        }
+                    } else {
+                        spans.push(Span::raw(instruction));
+                    }
+
+                    // Add comments
+                    if !comments.is_empty() {
+                        spans.push(Span::styled(" ; ", Style::default().fg(Color::DarkGray)));
+
+                        for (i, comment) in comments.iter().enumerate() {
+                            if i > 0 {
+                                spans.push(Span::raw(" "));
+                            }
+
+                            match comment {
+                                DisassemblyComment::BranchTarget(sym) => {
+                                    spans.push(Span::styled(
+                                        "-> ",
+                                        Style::default().fg(Color::DarkGray),
+                                    ));
+                                    let name = if let Some(n) = &sym.demangled {
+                                        n
+                                    } else {
+                                        &sym.name
+                                    };
+                                    spans.push(Span::styled(
+                                        name,
+                                        Style::default().fg(Color::Yellow),
+                                    ));
+                                }
+                                DisassemblyComment::MemoryReference(sym) => {
+                                    spans.push(Span::styled(
+                                        "ref ",
+                                        Style::default().fg(Color::DarkGray),
+                                    ));
+                                    let name = if let Some(n) = &sym.demangled {
+                                        n
+                                    } else {
+                                        &sym.name
+                                    };
+                                    spans.push(Span::styled(
+                                        name,
+                                        Style::default().fg(Color::Yellow),
+                                    ));
+                                }
+                                DisassemblyComment::Data(data) => {
+                                    spans.push(format_data_spans(data));
+                                }
+                            }
+                        }
+                    }
+
+                    ListItem::new(Line::from(spans))
+                }
+            }
+        })
         .collect();
 
     let disassembly_list = List::new(disassembly_items)
@@ -304,6 +419,99 @@ fn ui(f: &mut Frame, app: &App) {
             .split(help_area)[1];
 
         f.render_widget(help_paragraph, help_area);
+    }
+}
+
+// Helper function to highlight operands with proper syntax coloring
+fn highlight_operands(operands: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+
+    for part in operands.split(',') {
+        if !spans.is_empty() {
+            spans.push(Span::styled(",", Style::default().fg(Color::White)));
+            spans.push(Span::raw(" "));
+        }
+
+        let part = part.trim().to_string();
+
+        // Check if it's a register
+        if part.starts_with("r")
+            || part.starts_with("e")
+            || [
+                "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp", "eax", "ebx", "ecx", "edx",
+                "esi", "edi", "ebp", "esp",
+            ]
+            .contains(&part.as_str())
+        {
+            spans.push(Span::styled(part, Style::default().fg(Color::Blue)));
+        }
+        // Check if it's a number
+        else if part.starts_with("0x") || part.chars().next().map_or(false, |c| c.is_digit(10)) {
+            spans.push(Span::styled(part, Style::default().fg(Color::Cyan)));
+        }
+        // Otherwise, just use default styling
+        else {
+            spans.push(Span::raw(part));
+        }
+    }
+
+    spans
+}
+
+// Helper function to format data as spans
+fn format_data_spans(data: &[u8]) -> Span {
+    enum StrType {
+        Str,
+        WStr,
+    }
+
+    let str_data = {
+        let wide_len = data
+            .chunks(2)
+            .position(|c| c == [0, 0] || !(c[1] == 0 && char::from(c[0]).is_ascii()))
+            .unwrap_or(data.len());
+
+        if wide_len > 5 {
+            let chars = data
+                .chunks(2)
+                .map(|c| u16::from_le_bytes(c.try_into().unwrap()))
+                .take(wide_len)
+                .collect::<Vec<_>>();
+
+            Some((StrType::WStr, String::from_utf16_lossy(&chars)))
+        } else {
+            let len = data
+                .iter()
+                .position(|c| *c == 0 || !char::from(*c).is_ascii())
+                .unwrap_or(data.len());
+
+            if len > 5 {
+                Some((
+                    StrType::Str,
+                    String::from_utf8_lossy(&data[..len]).to_string(),
+                ))
+            } else {
+                None
+            }
+        }
+    };
+
+    if let Some((t, str)) = str_data {
+        let prefix = match t {
+            StrType::Str => "",
+            StrType::WStr => "L",
+        };
+        Span::styled(
+            format!("{}{:?}", prefix, str),
+            Style::default().fg(Color::Red),
+        )
+    } else {
+        let mut output = String::from("[");
+        for b in data {
+            output.push_str(&format!(" {b:02X}"));
+        }
+        output.push(']');
+        Span::styled(output, Style::default().fg(Color::Cyan))
     }
 }
 

@@ -161,7 +161,7 @@ fn disassemble_to_vec(
     start_address: Option<u64>,
     symbol: Option<String>,
     length: Option<usize>,
-) -> Result<(Vec<String>, Vec<SymbolInfo>), DisassemblerError> {
+) -> Result<(Vec<DisassemblyLine>, Vec<SymbolInfo>), DisassemblerError> {
     // Read the executable file
     let data = fs::read(file_path)?;
     let obj_file = File::parse(&*data)?;
@@ -190,12 +190,13 @@ fn disassemble_to_vec(
                 start_addr = Some(symbol.address);
             }
             symbols => {
-                let mut result = Vec::new();
-                result.push(format!("Found multiple matches for {symbol_name:?}:"));
-                for sym in symbols {
-                    result.push(format!("{:X} {}", sym.address, sym.display_name()));
-                }
-                return Ok((result, Vec::new()));
+                todo!();
+                //let mut result = Vec::new();
+                //result.push(format!("Found multiple matches for {symbol_name:?}:"));
+                //for sym in symbols {
+                //    result.push(format!("{:X} {}", sym.address, sym.display_name()));
+                //}
+                //return Ok((result, Vec::new()));
             }
         }
     }
@@ -276,14 +277,12 @@ fn disassemble_to_vec(
     let mut formatter = IntelFormatter::new();
     formatter.options_mut().set_first_operand_char_index(10);
 
-    // Buffer for formatted instructions
+    // Create a vector to store structured disassembly lines
     let mut result = Vec::new();
     let mut instruction = Instruction::default();
 
     // Disassemble instructions
     while decoder.can_decode() {
-        let mut output = String::new();
-
         // Decode instruction
         decoder.decode_out(&mut instruction);
 
@@ -291,41 +290,43 @@ fn disassemble_to_vec(
         let instr_address = instruction.ip();
 
         if let Some(syms) = symbol_map.get(&instr_address) {
-            result.push(String::new());
+            result.push(DisassemblyLine::Empty);
             for sym in syms {
-                result.push(format!(" ; {}", sym.display_name()));
+                result.push(DisassemblyLine::Symbol((*sym).clone()));
             }
-            result.push(String::new());
+            result.push(DisassemblyLine::Empty);
         }
 
-        // Format the instruction address
-        output.push_str(&format!("{:016X} ", instruction.ip()));
+        // Format the instruction address and bytes
+        let address = instruction.ip();
         let start_index = (instruction.ip() - text_address as u64) as usize;
         let instr_bytes = &text_data[start_index..start_index + instruction.len()];
-        for b in instr_bytes.iter() {
-            output.push_str(&format!("{:02X} ", b));
-        }
-
-        // Pad for alignment
-        for _ in instruction.len()..12 {
-            output.push_str("   ");
-        }
 
         // Format the instruction
-        formatter.format(&instruction, &mut MyFormatterOutput(&mut output));
+        let mut instr_text = String::new();
+        formatter.format(&instruction, &mut PlainFormatterOutput(&mut instr_text));
 
-        // Add inline symbols if in that mode
+        // Create a structured instruction line
+        let mut line = DisassemblyLine::Instruction {
+            address,
+            bytes: instr_bytes.to_vec(),
+            instruction: instr_text,
+            comments: Vec::new(),
+        };
+
+        // Add branch target comments if applicable
         let target = instruction.near_branch_target();
         if target != 0 {
             if let Some(syms) = symbol_map.get(&target) {
-                output.push_str(" ; -> ");
                 for sym in syms {
-                    output.push_str(&format!(" // {}", sym.display_name()));
+                    if let DisassemblyLine::Instruction { comments, .. } = &mut line {
+                        comments.push(DisassemblyComment::BranchTarget((*sym).clone()));
+                    }
                 }
             }
         }
 
-        // Find any interesting data this instruction is pointing to (e.g. strings)
+        // Add memory reference comments if applicable
         if instruction.is_ip_rel_memory_operand() {
             let address = instruction.ip_rel_memory_address();
 
@@ -337,21 +338,23 @@ fn disassemble_to_vec(
                     let data = &sec_data[(address - sec_address) as usize
                         ..((address - sec_address) as usize + 100).min(sec_data.len())];
 
-                    output.push_str("; ");
-                    output.push_str(&format_data(data));
+                    if let DisassemblyLine::Instruction { comments, .. } = &mut line {
+                        comments.push(DisassemblyComment::Data(data.to_vec()));
+                    }
                     break;
                 }
             }
 
             if let Some(syms) = symbol_map.get(&address) {
-                output.push_str(" ; -> ");
                 for sym in syms {
-                    output.push_str(&format!(" // {}", sym.display_name()));
+                    if let DisassemblyLine::Instruction { comments, .. } = &mut line {
+                        comments.push(DisassemblyComment::MemoryReference((*sym).clone()));
+                    }
                 }
             }
         }
 
-        result.push(output);
+        result.push(line);
     }
 
     Ok((result, symbols.clone()))
@@ -482,6 +485,35 @@ fn parse_hex_address(s: &str) -> Result<u64, String> {
     u64::from_str_radix(s, 16).map_err(|e| format!("Invalid hexadecimal address: {}", e))
 }
 
+// Define structured types for disassembly output
+#[derive(Clone)]
+pub enum DisassemblyLine {
+    Empty,
+    Symbol(SymbolInfo),
+    Instruction {
+        address: u64,
+        bytes: Vec<u8>,
+        instruction: String,
+        comments: Vec<DisassemblyComment>,
+    },
+}
+
+#[derive(Clone)]
+pub enum DisassemblyComment {
+    BranchTarget(SymbolInfo),
+    MemoryReference(SymbolInfo),
+    Data(Vec<u8>),
+}
+
+// Simple formatter that doesn't add colors
+struct PlainFormatterOutput<'a>(&'a mut String);
+
+impl FormatterOutput for PlainFormatterOutput<'_> {
+    fn write(&mut self, text: &str, _kind: FormatterTextKind) {
+        self.0.push_str(text);
+    }
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Cli::parse();
 
@@ -494,7 +526,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         None
     };
 
-    // Get the disassembly as a vector of strings
+    // Get the disassembly as structured data
     let (disassembly, symbols) = match disassemble_to_vec(
         &args.input,
         pdb,
