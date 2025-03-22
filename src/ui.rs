@@ -12,12 +12,7 @@ use crossterm::{
 use nucleo::pattern::{CaseMatching, Normalization};
 use object::{Object, ObjectSection as _};
 use ratatui::{
-    Frame, Terminal,
-    backend::{Backend, CrosstermBackend},
-    layout::{Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
-    text::{Line, Span, Text},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    backend::{Backend, CrosstermBackend}, layout::{Constraint, Direction, Layout}, style::{Color, Modifier, Style, Stylize}, text::{Line, Span, Text}, widgets::{Block, Borders, List, ListItem, ListState, Paragraph}, Frame, Terminal
 };
 use std::{
     error::Error,
@@ -624,30 +619,69 @@ fn ui(f: &mut Frame, app: &App) {
         &mut app.disassembly_state.clone(),
     );
 
-    // Symbols pane with search
+    // Symbols pane with integrated search
     let symbols_area = chunks[1];
-    let symbols_chunks = if app.search_mode {
-        // If in search mode, create a layout with search input at the top
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(1)].as_ref())
-            .split(symbols_area)
+
+    // Calculate the inner area of the symbols block to place the search bar and list
+    let symbols_inner_area = Block::default()
+        .title(if app.search_mode {
+            format!("Symbols ({} matches)", app.nucleo.snapshot().item_count())
+        } else {
+            format!("Symbols ({} total)", app.symbols.len())
+        })
+        .borders(Borders::ALL)
+        .border_style(if app.active_pane == Pane::Symbols {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default()
+        })
+        .inner(symbols_area);
+
+    // Render the block first
+    f.render_widget(
+        Block::default()
+            .title(if app.search_mode {
+                format!("Symbols ({} matches)", app.nucleo.snapshot().item_count())
+            } else {
+                format!("Symbols ({} total)", app.symbols.len())
+            })
+            .borders(Borders::ALL)
+            .border_style(if app.active_pane == Pane::Symbols {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default()
+            }),
+        symbols_area,
+    );
+
+    // Split the inner area for search bar and symbol list
+    let inner_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // Search bar takes just one line
+            Constraint::Min(1),    // Symbol list takes the rest
+        ])
+        .split(symbols_inner_area);
+
+    // Always render the search bar, but style it differently when not in search mode
+    let search_text = if app.search_mode {
+        format!("/{}", app.search_query)
     } else {
-        // Otherwise, use the full area for symbols
-        std::rc::Rc::new([symbols_area])
+        "Press '/' to search".to_string()
     };
 
-    // If in search mode, show the search input
-    if app.search_mode {
-        let search_input = Paragraph::new(format!("/{}", app.search_query))
-            .block(Block::default().title("Search").borders(Borders::ALL))
-            .style(Style::default().fg(Color::Yellow));
+    let search_style = if app.search_mode {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
 
-        f.render_widget(search_input, symbols_chunks[0]);
-    }
+    let search_bar = Paragraph::new(search_text).style(search_style);
+
+    f.render_widget(search_bar, inner_chunks[0]);
 
     // Symbols list - use filtered symbols if in search mode
-    let symbols_height = symbols_chunks.last().unwrap().height as usize - 2;
+    let symbols_height = inner_chunks[1].height as usize;
 
     let (symbol_items, total_count, start_idx, end_idx) = if app.search_mode {
         let snapshot = app.nucleo.snapshot();
@@ -657,13 +691,12 @@ fn ui(f: &mut Frame, app: &App) {
             .symbol_scroll
             .saturating_sub(symbols_height / 2)
             .min(count.saturating_sub(1));
-        let end_idx = (start_idx + symbols_height).min(count.saturating_sub(1));
+        let end_idx = (start_idx + symbols_height).min(count);
 
         let items: Vec<_> = snapshot
             .matched_items(start_idx as u32..end_idx as u32)
             .map(|item| {
                 let symbol = item.data;
-
                 let name = symbol.display_name();
 
                 // Highlight matching parts if there's a search query
@@ -675,12 +708,6 @@ fn ui(f: &mut Frame, app: &App) {
                         format!("{:X}: ", symbol.address),
                         Style::default().fg(Color::White),
                     )];
-
-                    // Add score indicator
-                    //spans.push(Span::styled(
-                    //    format!("[{}] ", score),
-                    //    Style::default().fg(Color::Green),
-                    //));
 
                     // Use the highlight_matches function to get match positions
                     let highlights = highlight_matches(name, &app.search_query);
@@ -725,37 +752,15 @@ fn ui(f: &mut Frame, app: &App) {
         (items, app.symbols.len(), start_idx, end_idx)
     };
 
-    let title = if app.search_mode {
-        format!("Symbols ({}/{} matches)", end_idx - start_idx, total_count)
-    } else {
-        format!("Symbols ({} total)", total_count)
-    };
-
-    let symbols_list = List::new(symbol_items)
-        .block(
-            Block::default()
-                .title(title)
-                .borders(Borders::ALL)
-                .border_style(if app.active_pane == Pane::Symbols {
-                    Style::default().fg(Color::Yellow)
-                } else {
-                    Style::default()
-                }),
-        )
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+    let symbols_list =
+        List::new(symbol_items).highlight_style(Style::default().add_modifier(Modifier::BOLD));
 
     let mut symbol_state = app.symbol_state.clone();
     if app.symbol_scroll >= start_idx && app.symbol_scroll < end_idx {
         symbol_state.select(Some(app.symbol_scroll - start_idx));
     }
 
-    let symbols_display_area = if app.search_mode {
-        symbols_chunks[1]
-    } else {
-        symbols_chunks[0]
-    };
-
-    f.render_stateful_widget(symbols_list, symbols_display_area, &mut symbol_state);
+    f.render_stateful_widget(symbols_list, inner_chunks[1], &mut symbol_state);
 
     if app.show_help {
         let help_text = vec![
