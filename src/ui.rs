@@ -4,6 +4,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use object::{Object, ObjectSection as _};
 use ratatui::{
     Frame, Terminal,
     backend::{Backend, CrosstermBackend},
@@ -262,6 +263,90 @@ impl App {
         // For now, return a reasonable default
         Some(20)
     }
+
+    // Method to jump to the top of the current pane
+    pub fn jump_to_top(&mut self) {
+        match self.active_pane {
+            Pane::Disassembly => {
+                // For disassembly, we need to find the earliest address
+                if let Some(first_addr) = self.find_first_address() {
+                    self.set_current_address(first_addr);
+                }
+                self.current_scroll = 0;
+                self.disassembly_state.select(Some(0));
+            }
+            Pane::Symbols => {
+                // For symbols, just go to the first one
+                self.symbol_scroll = 0;
+                self.symbol_state.select(Some(0));
+            }
+        }
+    }
+
+    // Method to jump to the bottom of the current pane
+    pub fn jump_to_bottom(&mut self) {
+        match self.active_pane {
+            Pane::Disassembly => {
+                // For disassembly, we need to find the latest address
+                if let Some(last_addr) = self.find_last_address() {
+                    self.set_current_address(last_addr);
+                }
+                // After refresh, we'll be at the top of the new view, so we need to scroll down
+                self.needs_refresh = true;
+            }
+            Pane::Symbols => {
+                // For symbols, go to the last one
+                if !self.symbols.is_empty() {
+                    let last_idx = self.symbols.len() - 1;
+                    self.symbol_scroll = last_idx;
+                    self.symbol_state.select(Some(last_idx));
+                }
+            }
+        }
+    }
+
+    // Helper to find the first address in the binary
+    fn find_first_address(&self) -> Option<u64> {
+        if let Some(binary_data) = &self.binary_data {
+            // Find the first section in the binary
+            let obj_file = binary_data.file.borrow_dependent();
+
+            // Otherwise, find the first section
+            let mut first_addr = None;
+            for section in obj_file.sections() {
+                if section.size() > 0 {
+                    let addr = section.address();
+                    if first_addr.is_none() || addr < first_addr.unwrap() {
+                        first_addr = Some(addr);
+                    }
+                }
+            }
+
+            return first_addr;
+        }
+        None
+    }
+
+    // Helper to find the last address in the binary
+    fn find_last_address(&self) -> Option<u64> {
+        if let Some(binary_data) = &self.binary_data {
+            // Find the last section in the binary
+            let obj_file = binary_data.file.borrow_dependent();
+
+            let mut last_addr = None;
+            for section in obj_file.sections() {
+                if section.size() > 0 {
+                    let addr = section.address() + section.size() - 1;
+                    if last_addr.is_none() || addr > last_addr.unwrap() {
+                        last_addr = Some(addr);
+                    }
+                }
+            }
+
+            return last_addr;
+        }
+        None
+    }
 }
 
 pub fn run_app<B: Backend>(
@@ -306,8 +391,8 @@ pub fn run_app<B: Backend>(
                         }
                         KeyCode::Char('?') | KeyCode::Char('h') => app.toggle_help(),
                         KeyCode::Tab => app.toggle_pane(),
-                        KeyCode::Up => app.scroll_up(),
-                        KeyCode::Down => app.scroll_down(),
+                        KeyCode::Up | KeyCode::Char('k') => app.scroll_up(),
+                        KeyCode::Down | KeyCode::Char('j') => app.scroll_down(),
                         KeyCode::PageUp => {
                             let height = terminal.size()?.height as usize;
                             app.page_up(height - 2);
@@ -317,18 +402,16 @@ pub fn run_app<B: Backend>(
                             app.page_down(height - 2);
                         }
                         KeyCode::Enter => app.select_symbol(),
-                        KeyCode::Char('d')
-                            if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
-                        {
+                        KeyCode::Char('d') => {
                             let height = terminal.size()?.height as usize;
                             app.page_down((height - 2) / 2); // Half page down
                         }
-                        KeyCode::Char('u')
-                            if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
-                        {
+                        KeyCode::Char('u') => {
                             let height = terminal.size()?.height as usize;
                             app.page_up((height - 2) / 2); // Half page up
                         }
+                        KeyCode::Char('g') => app.jump_to_top(),
+                        KeyCode::Char('G') => app.jump_to_bottom(),
                         _ => {}
                     }
                 }
@@ -524,9 +607,10 @@ fn ui(f: &mut Frame, app: &App) {
             "q - Quit",
             "h/? - Toggle help",
             "Tab - Switch pane",
-            "↑/↓ - Scroll up/down",
+            "↑/↓/j/k - Scroll up/down",
             "PgUp/PgDn - Page up/down",
-            "Ctrl+U/Ctrl+D - Half page up/down",
+            "u/d - Half page up/down",
+            "g/G - Jump to top/bottom",
             "Enter - Select symbol (in symbol pane)",
         ];
 
