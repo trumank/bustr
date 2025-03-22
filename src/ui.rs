@@ -235,6 +235,33 @@ impl App {
             None
         }
     }
+
+    pub fn half_page_up(&mut self) {
+        let page_size = if let Some(height) = self.get_visible_height() {
+            height / 2
+        } else {
+            10 // Default if we can't determine height
+        };
+
+        self.page_up(page_size);
+    }
+
+    pub fn half_page_down(&mut self) {
+        let page_size = if let Some(height) = self.get_visible_height() {
+            height / 2
+        } else {
+            10 // Default if we can't determine height
+        };
+
+        self.page_down(page_size);
+    }
+
+    // Helper to get the visible height (used for half-page scrolling)
+    fn get_visible_height(&self) -> Option<usize> {
+        // This is a placeholder - in the run_app function we'll pass the actual height
+        // For now, return a reasonable default
+        Some(20)
+    }
 }
 
 pub fn run_app<B: Backend>(
@@ -281,9 +308,27 @@ pub fn run_app<B: Backend>(
                         KeyCode::Tab => app.toggle_pane(),
                         KeyCode::Up => app.scroll_up(),
                         KeyCode::Down => app.scroll_down(),
-                        KeyCode::PageUp => app.page_up(10),
-                        KeyCode::PageDown => app.page_down(10),
+                        KeyCode::PageUp => {
+                            let height = terminal.size()?.height as usize;
+                            app.page_up(height - 2);
+                        }
+                        KeyCode::PageDown => {
+                            let height = terminal.size()?.height as usize;
+                            app.page_down(height - 2);
+                        }
                         KeyCode::Enter => app.select_symbol(),
+                        KeyCode::Char('d')
+                            if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
+                        {
+                            let height = terminal.size()?.height as usize;
+                            app.page_down((height - 2) / 2); // Half page down
+                        }
+                        KeyCode::Char('u')
+                            if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
+                        {
+                            let height = terminal.size()?.height as usize;
+                            app.page_up((height - 2) / 2); // Half page up
+                        }
                         _ => {}
                     }
                 }
@@ -481,6 +526,7 @@ fn ui(f: &mut Frame, app: &App) {
             "Tab - Switch pane",
             "↑/↓ - Scroll up/down",
             "PgUp/PgDn - Page up/down",
+            "Ctrl+U/Ctrl+D - Half page up/down",
             "Enter - Select symbol (in symbol pane)",
         ];
 
