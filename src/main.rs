@@ -1,3 +1,4 @@
+mod fuzzy;
 mod pdb_loader;
 mod ui;
 
