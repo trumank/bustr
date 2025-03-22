@@ -514,6 +514,192 @@ impl FormatterOutput for PlainFormatterOutput<'_> {
     }
 }
 
+// Add a new function to disassemble a specific range based on address
+pub fn disassemble_range(
+    file_path: &Path,
+    pdb_path: Option<&Path>,
+    address: u64,
+    visible_lines: usize,
+) -> Result<(Vec<DisassemblyLine>, Vec<SymbolInfo>), DisassemblerError> {
+    // Most of the code is similar to disassemble_to_vec, but with some adjustments
+    let data = fs::read(file_path)?;
+    let obj_file = File::parse(&*data)?;
+
+    // Load symbols
+    let mut symbols = if let Some(pdb) = pdb_path {
+        load_pdb_symbols(obj_file.relative_address_base(), pdb)?
+    } else {
+        load_object_symbols(file_path)?
+    };
+
+    // Sort symbols by address for binary search
+    symbols.sort_by_key(|s| s.address);
+
+    // Create a map for quick symbol lookup
+    let mut symbol_map: HashMap<u64, Vec<&SymbolInfo>> = HashMap::new();
+    for symbol in &symbols {
+        symbol_map.entry(symbol.address).or_default().push(symbol);
+    }
+
+    // Find the section containing the address
+    let mut section_found = false;
+    let mut text_section = None;
+
+    for section in obj_file.sections() {
+        let sec_address = section.address();
+        let sec_size = section.size();
+        let mem_range = sec_address..(sec_address + sec_size);
+
+        if mem_range.contains(&address) {
+            text_section = Some(section);
+            section_found = true;
+            break;
+        }
+    }
+
+    // If we didn't find a section containing the address, use the .text section
+    if !section_found {
+        text_section = obj_file.section_by_name(".text");
+    }
+
+    let text_section =
+        text_section.ok_or_else(|| DisassemblerError::Format("Text section not found".into()))?;
+
+    let text_data = text_section.data()?;
+    let text_address = text_section.address();
+
+    // Calculate offset within section
+    let offset = if address >= text_address {
+        (address - text_address) as usize
+    } else {
+        0
+    };
+
+    // Make sure we don't go past the end of the section
+    if offset >= text_data.len() {
+        return Err(DisassemblerError::Format(format!(
+            "Address 0x{:X} is outside of section bounds",
+            address
+        )));
+    }
+
+    // Determine how many bytes to disassemble
+    // We'll disassemble more than needed to ensure we have enough lines
+    let end = (offset + visible_lines * 16).min(text_data.len());
+
+    // Determine architecture
+    let architecture = match obj_file.architecture() {
+        object::Architecture::X86_64 => 64,
+        object::Architecture::I386 => 32,
+        arch => {
+            return Err(DisassemblerError::Format(format!(
+                "Unsupported architecture: {:?}",
+                arch
+            )));
+        }
+    };
+
+    // Create decoder
+    let mut decoder = Decoder::with_ip(
+        architecture,
+        &text_data[offset..end],
+        text_address + offset as u64,
+        DecoderOptions::NONE,
+    );
+
+    let mut formatter = IntelFormatter::new();
+    formatter.options_mut().set_first_operand_char_index(10);
+
+    // Create a vector to store structured disassembly lines
+    let mut result = Vec::new();
+    let mut instruction = Instruction::default();
+
+    // Disassemble instructions until we have enough lines or can't decode anymore
+    let mut line_count = 0;
+    while decoder.can_decode() && line_count < visible_lines * 2 {
+        // Decode instruction
+        decoder.decode_out(&mut instruction);
+
+        // Check if instruction address matches a known symbol
+        let instr_address = instruction.ip();
+
+        if let Some(syms) = symbol_map.get(&instr_address) {
+            result.push(DisassemblyLine::Empty);
+            line_count += 1;
+
+            for sym in syms {
+                result.push(DisassemblyLine::Symbol((*sym).clone()));
+                line_count += 1;
+            }
+
+            result.push(DisassemblyLine::Empty);
+            line_count += 1;
+        }
+
+        // Format the instruction address and bytes
+        let address = instruction.ip();
+        let start_index = (instruction.ip() - text_address as u64) as usize;
+        let instr_bytes = &text_data[start_index..start_index + instruction.len()];
+
+        // Format the instruction
+        let mut instr_text = String::new();
+        formatter.format(&instruction, &mut PlainFormatterOutput(&mut instr_text));
+
+        // Create a structured instruction line
+        let mut line = DisassemblyLine::Instruction {
+            address,
+            bytes: instr_bytes.to_vec(),
+            instruction: instr_text,
+            comments: Vec::new(),
+        };
+
+        // Add branch target comments if applicable
+        let target = instruction.near_branch_target();
+        if target != 0 {
+            if let Some(syms) = symbol_map.get(&target) {
+                for sym in syms {
+                    if let DisassemblyLine::Instruction { comments, .. } = &mut line {
+                        comments.push(DisassemblyComment::BranchTarget((*sym).clone()));
+                    }
+                }
+            }
+        }
+
+        // Add memory reference comments if applicable
+        if instruction.is_ip_rel_memory_operand() {
+            let address = instruction.ip_rel_memory_address();
+
+            for section in obj_file.sections() {
+                let sec_address = section.address();
+                let sec_data = section.data()?;
+                let mem_range = sec_address..sec_address + sec_data.len() as u64;
+                if mem_range.contains(&address) {
+                    let data = &sec_data[(address - sec_address) as usize
+                        ..((address - sec_address) as usize + 100).min(sec_data.len())];
+
+                    if let DisassemblyLine::Instruction { comments, .. } = &mut line {
+                        comments.push(DisassemblyComment::Data(data.to_vec()));
+                    }
+                    break;
+                }
+            }
+
+            if let Some(syms) = symbol_map.get(&address) {
+                for sym in syms {
+                    if let DisassemblyLine::Instruction { comments, .. } = &mut line {
+                        comments.push(DisassemblyComment::MemoryReference((*sym).clone()));
+                    }
+                }
+            }
+        }
+
+        result.push(line);
+        line_count += 1;
+    }
+
+    Ok((result, symbols))
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Cli::parse();
 
@@ -526,7 +712,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         None
     };
 
-    // Get the disassembly as structured data
+    // Get initial disassembly and symbols
     let (disassembly, symbols) = match disassemble_to_vec(
         &args.input,
         pdb,
@@ -541,6 +727,31 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     };
 
+    // Get the starting address
+    let start_address = if let Some(addr) = args.address {
+        addr
+    } else if !disassembly.is_empty() {
+        // Get the address of the first instruction
+        match &disassembly[0] {
+            DisassemblyLine::Instruction { address, .. } => *address,
+            _ => {
+                // Find the first instruction
+                disassembly
+                    .iter()
+                    .find_map(|line| {
+                        if let DisassemblyLine::Instruction { address, .. } = line {
+                            Some(*address)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(0)
+            }
+        }
+    } else {
+        0
+    };
+
     // Set up the terminal UI
     let mut terminal = setup_terminal()?;
 
@@ -548,6 +759,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut app = App::new();
     app.set_disassembly(disassembly);
     app.set_symbols(symbols);
+    app.set_file_info(&args.input, pdb);
+    app.set_current_address(start_address);
 
     // Run the app
     let tick_rate = Duration::from_millis(250);

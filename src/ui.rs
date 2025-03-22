@@ -15,6 +15,8 @@ use ratatui::{
 use std::{
     error::Error,
     io,
+    path::Path,
+    path::PathBuf,
     time::{Duration, Instant},
 };
 
@@ -29,6 +31,10 @@ pub struct App {
     pub active_pane: Pane,
     pub disassembly_state: ListState,
     pub symbol_state: ListState,
+    pub current_address: u64,
+    pub file_path: Option<PathBuf>,
+    pub pdb_path: Option<PathBuf>,
+    pub needs_refresh: bool,
 }
 
 #[derive(PartialEq)]
@@ -56,6 +62,10 @@ impl App {
             active_pane: Pane::Disassembly,
             disassembly_state,
             symbol_state,
+            current_address: 0,
+            file_path: None,
+            pdb_path: None,
+            needs_refresh: false,
         }
     }
 
@@ -67,12 +77,26 @@ impl App {
         self.symbols = symbols;
     }
 
+    pub fn set_file_info(&mut self, file_path: &Path, pdb_path: Option<&Path>) {
+        self.file_path = Some(file_path.to_path_buf());
+        self.pdb_path = pdb_path.map(|p| p.to_path_buf());
+    }
+
+    pub fn set_current_address(&mut self, address: u64) {
+        self.current_address = address;
+        self.needs_refresh = true;
+    }
+
     pub fn scroll_up(&mut self) {
         match self.active_pane {
             Pane::Disassembly => {
                 if self.current_scroll > 0 {
                     self.current_scroll -= 1;
                     self.disassembly_state.select(Some(self.current_scroll));
+                } else if !self.disassembly.is_empty() {
+                    if let Some(prev_addr) = self.find_previous_address() {
+                        self.set_current_address(prev_addr);
+                    }
                 }
             }
             Pane::Symbols => {
@@ -90,6 +114,10 @@ impl App {
                 if self.current_scroll < self.disassembly.len().saturating_sub(1) {
                     self.current_scroll += 1;
                     self.disassembly_state.select(Some(self.current_scroll));
+                } else if !self.disassembly.is_empty() {
+                    if let Some(next_addr) = self.find_next_address() {
+                        self.set_current_address(next_addr);
+                    }
                 }
             }
             Pane::Symbols => {
@@ -104,8 +132,19 @@ impl App {
     pub fn page_up(&mut self, page_size: usize) {
         match self.active_pane {
             Pane::Disassembly => {
-                self.current_scroll = self.current_scroll.saturating_sub(page_size);
-                self.disassembly_state.select(Some(self.current_scroll));
+                if self.current_scroll > page_size {
+                    self.current_scroll -= page_size;
+                    self.disassembly_state.select(Some(self.current_scroll));
+                } else {
+                    self.current_scroll = 0;
+                    self.disassembly_state.select(Some(0));
+
+                    if !self.disassembly.is_empty() {
+                        self.set_current_address(
+                            self.current_address.saturating_sub(page_size as u64 * 16),
+                        );
+                    }
+                }
             }
             Pane::Symbols => {
                 self.symbol_scroll = self.symbol_scroll.saturating_sub(page_size);
@@ -118,8 +157,17 @@ impl App {
         match self.active_pane {
             Pane::Disassembly => {
                 let max = self.disassembly.len().saturating_sub(1);
-                self.current_scroll = (self.current_scroll + page_size).min(max);
-                self.disassembly_state.select(Some(self.current_scroll));
+                if self.current_scroll + page_size < max {
+                    self.current_scroll += page_size;
+                    self.disassembly_state.select(Some(self.current_scroll));
+                } else {
+                    self.current_scroll = max;
+                    self.disassembly_state.select(Some(max));
+
+                    if !self.disassembly.is_empty() {
+                        self.set_current_address(self.current_address + page_size as u64 * 16);
+                    }
+                }
             }
             Pane::Symbols => {
                 let max = self.symbols.len().saturating_sub(1);
@@ -142,8 +190,43 @@ impl App {
 
     pub fn select_symbol(&mut self) {
         if self.active_pane == Pane::Symbols && !self.symbols.is_empty() {
-            self.selected_symbol_index = Some(self.symbol_scroll);
-            // Here you would typically update the disassembly to show the selected symbol
+            let idx = self.symbol_scroll;
+            if idx < self.symbols.len() {
+                self.selected_symbol_index = Some(idx);
+
+                let symbol = &self.symbols[idx];
+                self.set_current_address(symbol.address);
+
+                self.active_pane = Pane::Disassembly;
+            }
+        }
+    }
+
+    fn find_previous_address(&self) -> Option<u64> {
+        if let Some(first_instr) = self.disassembly.iter().find_map(|line| {
+            if let DisassemblyLine::Instruction { address, .. } = line {
+                Some(address)
+            } else {
+                None
+            }
+        }) {
+            Some(first_instr.saturating_sub(4))
+        } else {
+            None
+        }
+    }
+
+    fn find_next_address(&self) -> Option<u64> {
+        if let Some(last_instr) = self.disassembly.iter().rev().find_map(|line| {
+            if let DisassemblyLine::Instruction { address, bytes, .. } = line {
+                Some((*address, bytes.len() as u64))
+            } else {
+                None
+            }
+        }) {
+            Some(last_instr.0 + last_instr.1)
+        } else {
+            None
         }
     }
 }
@@ -155,6 +238,30 @@ pub fn run_app<B: Backend>(
 ) -> io::Result<App> {
     let mut last_tick = Instant::now();
     loop {
+        if app.needs_refresh {
+            if let (Some(file_path), Some(height)) = (
+                &app.file_path,
+                terminal.size().ok().map(|s| s.height as usize),
+            ) {
+                match crate::disassemble_range(
+                    file_path,
+                    app.pdb_path.as_deref(),
+                    app.current_address,
+                    height,
+                ) {
+                    Ok((disassembly, _)) => {
+                        app.set_disassembly(disassembly);
+                        app.current_scroll = 0;
+                        app.disassembly_state.select(Some(0));
+                    }
+                    Err(e) => {
+                        eprintln!("Error refreshing disassembly: {}", e);
+                    }
+                }
+                app.needs_refresh = false;
+            }
+        }
+
         terminal.draw(|f| ui(f, &app))?;
 
         let timeout = tick_rate
@@ -191,130 +298,113 @@ pub fn run_app<B: Backend>(
 }
 
 fn ui(f: &mut Frame, app: &App) {
-    // Create a layout with two main sections
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(70), Constraint::Percentage(30)].as_ref())
         .split(f.size());
 
-    // Disassembly pane - convert structured data to styled text
     let disassembly_items: Vec<ListItem> = app
         .disassembly
         .iter()
-        .map(|line| {
-            match line {
-                DisassemblyLine::Empty => ListItem::new(""),
-                DisassemblyLine::Symbol(symbol) => {
-                    let name = if let Some(n) = &symbol.demangled {
-                        n
-                    } else {
-                        &symbol.name
-                    };
+        .map(|line| match line {
+            DisassemblyLine::Empty => ListItem::new(""),
+            DisassemblyLine::Symbol(symbol) => {
+                let name = if let Some(n) = &symbol.demangled {
+                    n
+                } else {
+                    &symbol.name
+                };
 
-                    let style = match symbol.kind {
-                        SymbolKind::Function => Style::default().fg(Color::Yellow),
-                        SymbolKind::Data => Style::default().fg(Color::Cyan),
-                    };
+                let style = match symbol.kind {
+                    SymbolKind::Function => Style::default().fg(Color::Yellow),
+                    SymbolKind::Data => Style::default().fg(Color::Cyan),
+                };
 
-                    ListItem::new(Line::from(vec![
-                        Span::styled(" ; ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(name, style),
-                    ]))
+                ListItem::new(Line::from(vec![
+                    Span::styled(" ; ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(name, style),
+                ]))
+            }
+            DisassemblyLine::Instruction {
+                address,
+                bytes,
+                instruction,
+                comments,
+            } => {
+                let mut spans = vec![Span::styled(
+                    format!("{:016X} ", address),
+                    Style::default().fg(Color::White),
+                )];
+
+                for b in bytes {
+                    spans.push(Span::styled(
+                        format!("{:02X} ", b),
+                        Style::default().fg(Color::DarkGray),
+                    ));
                 }
-                DisassemblyLine::Instruction {
-                    address,
-                    bytes,
-                    instruction,
-                    comments,
-                } => {
-                    // Format address
-                    let mut spans = vec![Span::styled(
-                        format!("{:016X} ", address),
-                        Style::default().fg(Color::White),
-                    )];
 
-                    // Format bytes
-                    for b in bytes {
-                        spans.push(Span::styled(
-                            format!("{:02X} ", b),
-                            Style::default().fg(Color::DarkGray),
-                        ));
+                for _ in bytes.len()..12 {
+                    spans.push(Span::raw("   "));
+                }
+
+                let instr_parts: Vec<&str> = instruction.split_whitespace().collect();
+                if !instr_parts.is_empty() {
+                    spans.push(Span::styled(
+                        instr_parts[0],
+                        Style::default().fg(Color::Red),
+                    ));
+                    spans.push(Span::raw(" "));
+
+                    if instr_parts.len() > 1 {
+                        let operands = instr_parts[1..].join(" ");
+                        let operand_spans = highlight_operands(&operands);
+                        spans.extend(operand_spans);
                     }
+                } else {
+                    spans.push(Span::raw(instruction));
+                }
 
-                    // Pad for alignment
-                    for _ in bytes.len()..12 {
-                        spans.push(Span::raw("   "));
-                    }
+                if !comments.is_empty() {
+                    spans.push(Span::styled(" ; ", Style::default().fg(Color::DarkGray)));
 
-                    // Format instruction with syntax highlighting
-                    let instr_parts: Vec<&str> = instruction.split_whitespace().collect();
-                    if !instr_parts.is_empty() {
-                        // Mnemonic
-                        spans.push(Span::styled(
-                            instr_parts[0],
-                            Style::default().fg(Color::Red),
-                        ));
-                        spans.push(Span::raw(" "));
-
-                        // Operands
-                        if instr_parts.len() > 1 {
-                            let operands = instr_parts[1..].join(" ");
-                            let operand_spans = highlight_operands(&operands);
-                            spans.extend(operand_spans);
+                    for (i, comment) in comments.iter().enumerate() {
+                        if i > 0 {
+                            spans.push(Span::raw(" "));
                         }
-                    } else {
-                        spans.push(Span::raw(instruction));
-                    }
 
-                    // Add comments
-                    if !comments.is_empty() {
-                        spans.push(Span::styled(" ; ", Style::default().fg(Color::DarkGray)));
-
-                        for (i, comment) in comments.iter().enumerate() {
-                            if i > 0 {
-                                spans.push(Span::raw(" "));
+                        match comment {
+                            DisassemblyComment::BranchTarget(sym) => {
+                                spans.push(Span::styled(
+                                    "-> ",
+                                    Style::default().fg(Color::DarkGray),
+                                ));
+                                let name = if let Some(n) = &sym.demangled {
+                                    n
+                                } else {
+                                    &sym.name
+                                };
+                                spans.push(Span::styled(name, Style::default().fg(Color::Yellow)));
                             }
-
-                            match comment {
-                                DisassemblyComment::BranchTarget(sym) => {
-                                    spans.push(Span::styled(
-                                        "-> ",
-                                        Style::default().fg(Color::DarkGray),
-                                    ));
-                                    let name = if let Some(n) = &sym.demangled {
-                                        n
-                                    } else {
-                                        &sym.name
-                                    };
-                                    spans.push(Span::styled(
-                                        name,
-                                        Style::default().fg(Color::Yellow),
-                                    ));
-                                }
-                                DisassemblyComment::MemoryReference(sym) => {
-                                    spans.push(Span::styled(
-                                        "ref ",
-                                        Style::default().fg(Color::DarkGray),
-                                    ));
-                                    let name = if let Some(n) = &sym.demangled {
-                                        n
-                                    } else {
-                                        &sym.name
-                                    };
-                                    spans.push(Span::styled(
-                                        name,
-                                        Style::default().fg(Color::Yellow),
-                                    ));
-                                }
-                                DisassemblyComment::Data(data) => {
-                                    spans.push(format_data_spans(data));
-                                }
+                            DisassemblyComment::MemoryReference(sym) => {
+                                spans.push(Span::styled(
+                                    "ref ",
+                                    Style::default().fg(Color::DarkGray),
+                                ));
+                                let name = if let Some(n) = &sym.demangled {
+                                    n
+                                } else {
+                                    &sym.name
+                                };
+                                spans.push(Span::styled(name, Style::default().fg(Color::Yellow)));
+                            }
+                            DisassemblyComment::Data(data) => {
+                                spans.push(format_data_spans(data));
                             }
                         }
                     }
-
-                    ListItem::new(Line::from(spans))
                 }
+
+                ListItem::new(Line::from(spans))
             }
         })
         .collect();
@@ -322,7 +412,11 @@ fn ui(f: &mut Frame, app: &App) {
     let disassembly_list = List::new(disassembly_items)
         .block(
             Block::default()
-                .title(format!("Disassembly ({} lines)", app.disassembly.len()))
+                .title(format!(
+                    "Disassembly @ 0x{:X} ({} lines)",
+                    app.current_address,
+                    app.disassembly.len()
+                ))
                 .borders(Borders::ALL)
                 .border_style(if app.active_pane == Pane::Disassembly {
                     Style::default().fg(Color::Yellow)
@@ -338,13 +432,10 @@ fn ui(f: &mut Frame, app: &App) {
         &mut app.disassembly_state.clone(),
     );
 
-    // Symbols pane - Lazy loading implementation
-    // Calculate visible range based on terminal height
-    let symbols_height = chunks[1].height as usize - 2; // Subtract 2 for borders
+    let symbols_height = chunks[1].height as usize - 2;
     let start_idx = app.symbol_scroll.saturating_sub(symbols_height / 2);
     let end_idx = (start_idx + symbols_height).min(app.symbols.len());
 
-    // Only create ListItems for visible symbols
     let symbol_items: Vec<ListItem> = app.symbols[start_idx..end_idx]
         .iter()
         .map(|symbol| {
@@ -370,7 +461,6 @@ fn ui(f: &mut Frame, app: &App) {
         )
         .highlight_style(Style::default().add_modifier(Modifier::BOLD));
 
-    // Adjust the state for the visible range
     let mut symbol_state = app.symbol_state.clone();
     if app.symbol_scroll >= start_idx && app.symbol_scroll < end_idx {
         symbol_state.select(Some(app.symbol_scroll - start_idx));
@@ -378,7 +468,6 @@ fn ui(f: &mut Frame, app: &App) {
 
     f.render_stateful_widget(symbols_list, chunks[1], &mut symbol_state);
 
-    // Help overlay
     if app.show_help {
         let help_text = vec![
             "Help:",
@@ -422,7 +511,6 @@ fn ui(f: &mut Frame, app: &App) {
     }
 }
 
-// Helper function to highlight operands with proper syntax coloring
 fn highlight_operands(operands: &str) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
 
@@ -434,7 +522,6 @@ fn highlight_operands(operands: &str) -> Vec<Span<'static>> {
 
         let part = part.trim().to_string();
 
-        // Check if it's a register
         if part.starts_with("r")
             || part.starts_with("e")
             || [
@@ -444,13 +531,9 @@ fn highlight_operands(operands: &str) -> Vec<Span<'static>> {
             .contains(&part.as_str())
         {
             spans.push(Span::styled(part, Style::default().fg(Color::Blue)));
-        }
-        // Check if it's a number
-        else if part.starts_with("0x") || part.chars().next().map_or(false, |c| c.is_digit(10)) {
+        } else if part.starts_with("0x") || part.chars().next().map_or(false, |c| c.is_digit(10)) {
             spans.push(Span::styled(part, Style::default().fg(Color::Cyan)));
-        }
-        // Otherwise, just use default styling
-        else {
+        } else {
             spans.push(Span::raw(part));
         }
     }
@@ -458,7 +541,6 @@ fn highlight_operands(operands: &str) -> Vec<Span<'static>> {
     spans
 }
 
-// Helper function to format data as spans
 fn format_data_spans(data: &[u8]) -> Span {
     enum StrType {
         Str,
