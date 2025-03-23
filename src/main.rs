@@ -392,6 +392,13 @@ pub fn disassemble_range(
 fn main() -> Result<(), Box<dyn Error>> {
     color_eyre::install()?;
 
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        crossterm::execute!(std::io::stderr(), crossterm::terminal::LeaveAlternateScreen).unwrap();
+        crossterm::terminal::disable_raw_mode().unwrap();
+        hook(panic_info);
+    }));
+
     let args = Cli::parse();
 
     let adj_pdb = args.input.with_extension("pdb");
