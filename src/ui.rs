@@ -10,6 +10,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use nucleo::pattern::{CaseMatching, Normalization};
+use patternsleuth_image::PatternConfig;
 use ratatui::{
     Frame, Terminal,
     backend::{Backend, CrosstermBackend},
@@ -46,12 +47,33 @@ pub struct App<'data> {
     pub binary_data: Option<BinaryData<'data>>,
     pub search_query: String,
     nucleo: nucleo::Nucleo<SymbolInfo>,
+    pub xref_mode: bool,
+    pub xref_query: String,
+    pub xrefs: Vec<XRefInfo>,
+    pub xref_scroll: usize,
+    pub xref_state: ListState,
 }
 
 #[derive(PartialEq)]
 pub enum Pane {
     Disassembly,
     Symbols,
+    XRefs,
+}
+
+#[derive(Clone)]
+pub struct XRefInfo {
+    pub from_address: u64,
+    pub to_address: u64,
+    pub kind: XRefKind,
+    pub instruction: String,
+}
+
+#[derive(Clone, PartialEq)]
+pub enum XRefKind {
+    Call,
+    Jump,
+    DataRef,
 }
 
 impl<'data> App<'data> {
@@ -61,6 +83,9 @@ impl<'data> App<'data> {
 
         let mut symbol_state = ListState::default();
         symbol_state.select(Some(0));
+
+        let mut xref_state = ListState::default();
+        xref_state.select(Some(0));
 
         Self {
             disassembly: Vec::new(),
@@ -88,6 +113,11 @@ impl<'data> App<'data> {
                 None,
                 1,
             ),
+            xref_mode: false,
+            xref_query: String::new(),
+            xrefs: Vec::new(),
+            xref_scroll: 0,
+            xref_state,
         }
     }
 
@@ -132,6 +162,13 @@ impl<'data> App<'data> {
                     self.select_symbol();
                 }
             }
+            Pane::XRefs => {
+                if self.xref_scroll > 0 {
+                    self.xref_scroll -= 1;
+                    self.xref_state.select(Some(self.xref_scroll));
+                    self.select_xref();
+                }
+            }
         }
     }
 
@@ -152,6 +189,13 @@ impl<'data> App<'data> {
                     self.symbol_scroll += 1;
                     self.symbol_state.select(Some(self.symbol_scroll));
                     self.select_symbol();
+                }
+            }
+            Pane::XRefs => {
+                if self.xref_scroll < self.xrefs.len().saturating_sub(1) {
+                    self.xref_scroll += 1;
+                    self.xref_state.select(Some(self.xref_scroll));
+                    self.select_xref();
                 }
             }
         }
@@ -179,6 +223,11 @@ impl<'data> App<'data> {
                 self.symbol_state.select(Some(self.symbol_scroll));
                 self.select_symbol();
             }
+            Pane::XRefs => {
+                self.xref_scroll = self.xref_scroll.saturating_sub(page_size);
+                self.xref_state.select(Some(self.xref_scroll));
+                self.select_xref();
+            }
         }
     }
 
@@ -204,6 +253,12 @@ impl<'data> App<'data> {
                 self.symbol_state.select(Some(self.symbol_scroll));
                 self.select_symbol();
             }
+            Pane::XRefs => {
+                let max = self.xrefs.len().saturating_sub(1);
+                self.xref_scroll = (self.xref_scroll + page_size).min(max);
+                self.xref_state.select(Some(self.xref_scroll));
+                self.select_xref();
+            }
         }
     }
 
@@ -214,7 +269,8 @@ impl<'data> App<'data> {
     pub fn toggle_pane(&mut self) {
         self.active_pane = match self.active_pane {
             Pane::Disassembly => Pane::Symbols,
-            Pane::Symbols => Pane::Disassembly,
+            Pane::Symbols => Pane::XRefs,
+            Pane::XRefs => Pane::Disassembly,
         };
     }
 
@@ -278,6 +334,10 @@ impl<'data> App<'data> {
                 self.symbol_scroll = 0;
                 self.symbol_state.select(Some(0));
             }
+            Pane::XRefs => {
+                self.xref_scroll = 0;
+                self.xref_state.select(Some(0));
+            }
         }
     }
 
@@ -297,6 +357,13 @@ impl<'data> App<'data> {
                     let last_idx = self.symbols.len() - 1;
                     self.symbol_scroll = last_idx;
                     self.symbol_state.select(Some(last_idx));
+                }
+            }
+            Pane::XRefs => {
+                if !self.xrefs.is_empty() {
+                    let last_idx = self.xrefs.len() - 1;
+                    self.xref_scroll = last_idx;
+                    self.xref_state.select(Some(last_idx));
                 }
             }
         }
@@ -363,6 +430,89 @@ impl<'data> App<'data> {
         // Reset scroll position
         self.symbol_scroll = 0;
     }
+
+    // Add methods for XRef functionality
+    pub fn toggle_xref_mode(&mut self) {
+        if self.active_pane == Pane::XRefs {
+            self.xref_mode = !self.xref_mode;
+            if self.xref_mode {
+                self.xref_query.clear();
+            }
+        }
+    }
+
+    pub fn add_to_xref_query(&mut self, c: char) {
+        if self.xref_mode {
+            self.xref_query.push(c);
+        }
+    }
+
+    pub fn backspace_xref_query(&mut self) {
+        if self.xref_mode && !self.xref_query.is_empty() {
+            self.xref_query.pop();
+        }
+    }
+
+    pub fn submit_xref_query(&mut self) {
+        if self.xref_mode && !self.xref_query.is_empty() {
+            // Parse the address from the query
+            if let Ok(addr) = u64::from_str_radix(self.xref_query.trim_start_matches("0x"), 16) {
+                self.find_xrefs(addr);
+                self.xref_mode = false;
+            }
+        }
+    }
+
+    pub fn find_xrefs(&mut self, address: u64) {
+        let Some(binary_data) = &self.binary_data else {
+            return;
+        };
+
+        let config = [PatternConfig::xref(
+            (),
+            "".into(),
+            None,
+            patternsleuth_image::scanner::Xref(address as usize),
+        )];
+
+        let res = binary_data.file.scan(&config).unwrap();
+        let res: Vec<u64> = res
+            .results
+            .into_iter()
+            .map(|(_, r)| r.address as u64)
+            .collect();
+
+        // Stub implementation - in a real implementation, this would scan the binary
+        // for references to the given address
+        self.xrefs.clear();
+
+        for r in res {
+            self.xrefs.push(XRefInfo {
+                from_address: r,
+                to_address: address,
+                kind: XRefKind::Call,
+                instruction: format!("call 0x{:X}", address),
+            });
+        }
+
+        // Reset scroll position
+        self.xref_scroll = 0;
+        if !self.xrefs.is_empty() {
+            self.xref_state.select(Some(0));
+        }
+    }
+
+    pub fn select_xref(&mut self) {
+        if self.active_pane == Pane::XRefs {
+            if let Some(selected) = self.xref_state.selected() {
+                if selected < self.xrefs.len() {
+                    let xref = &self.xrefs[selected];
+                    self.set_current_address(xref.from_address);
+                    //self.active_pane = Pane::Disassembly;
+                }
+            }
+        }
+    }
 }
 
 pub fn run_app<'data, B: Backend>(
@@ -377,11 +527,21 @@ pub fn run_app<'data, B: Backend>(
                 terminal.size().ok().map(|s| s.height as usize),
                 &app.binary_data,
             ) {
-                match crate::disassemble_range(binary_data, app.current_address, height) {
+                match crate::disassemble_range(binary_data, app.current_address - 100, height) {
                     Ok(disassembly) => {
+                        let selected = disassembly
+                            .iter()
+                            .rposition(|l| match l {
+                                DisassemblyLine::Instruction { address, .. } => {
+                                    *address <= app.current_address
+                                }
+                                _ => false,
+                            })
+                            .unwrap_or(0);
                         app.set_disassembly(disassembly);
+                        app.disassembly_state.select(Some(selected));
+                        *app.disassembly_state.offset_mut() = selected.saturating_sub(10);
                         app.current_scroll = 0;
-                        app.disassembly_state.select(Some(0));
                     }
                     Err(e) => {
                         eprintln!("Error refreshing disassembly: {}", e);
@@ -400,10 +560,18 @@ pub fn run_app<'data, B: Backend>(
         if crossterm::event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
-                    // Handle search mode separately
-                    if (app.active_pane == Pane::Symbols && app.search_mode)
-                        && !key.modifiers.contains(KeyModifiers::CONTROL)
-                    {
+                    // Handle XRef mode separately
+                    if app.active_pane == Pane::XRefs && app.xref_mode {
+                        match key.code {
+                            KeyCode::Esc => app.toggle_xref_mode(),
+                            KeyCode::Backspace => app.backspace_xref_query(),
+                            KeyCode::Enter => app.submit_xref_query(),
+                            KeyCode::Char(c) if c.is_ascii_hexdigit() || c == 'x' => {
+                                app.add_to_xref_query(c)
+                            }
+                            _ => {}
+                        }
+                    } else if app.search_mode {
                         match key.code {
                             KeyCode::Esc => app.toggle_search(),
                             KeyCode::Backspace => app.backspace_search(),
@@ -439,7 +607,6 @@ pub fn run_app<'data, B: Backend>(
                                 let height = terminal.size()?.height as usize;
                                 app.page_down(height - 2);
                             }
-                            KeyCode::Enter => app.select_symbol(),
                             KeyCode::Char('d') => {
                                 let height = terminal.size()?.height as usize;
                                 app.page_down((height - 2) / 2); // Half page down
@@ -452,6 +619,18 @@ pub fn run_app<'data, B: Backend>(
                             KeyCode::Char('G') => app.jump_to_bottom(),
 
                             KeyCode::Char('/') => app.toggle_search(), // Start search with /
+                            KeyCode::Char('x') => {
+                                if app.active_pane == Pane::XRefs {
+                                    app.toggle_xref_mode();
+                                }
+                            }
+                            KeyCode::Enter => {
+                                if app.active_pane == Pane::Symbols {
+                                    app.select_symbol();
+                                } else if app.active_pane == Pane::XRefs {
+                                    app.select_xref();
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -472,6 +651,11 @@ fn ui(f: &mut Frame, app: &App) {
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(70), Constraint::Percentage(30)].as_ref())
         .split(f.size());
+
+    let chunks_vert = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
+        .split(chunks[1]);
 
     let disassembly_items: Vec<ListItem> = app
         .disassembly
@@ -597,7 +781,7 @@ fn ui(f: &mut Frame, app: &App) {
     );
 
     // Symbols pane with integrated search
-    let symbols_area = chunks[1];
+    let symbols_area = chunks_vert[0];
 
     // Calculate the inner area of the symbols block to place the search bar and list
     let symbols_inner_area = Block::default()
@@ -739,6 +923,106 @@ fn ui(f: &mut Frame, app: &App) {
 
     f.render_stateful_widget(symbols_list, inner_chunks[1], &mut symbol_state);
 
+    // XRefs pane (bottom right)
+    let xrefs_area = chunks_vert[1];
+
+    // Calculate the inner area of the XRefs block
+    let xrefs_inner_area = Block::default()
+        .title(format!("XRefs ({} found)", app.xrefs.len()))
+        .borders(Borders::ALL)
+        .border_style(if app.active_pane == Pane::XRefs {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default()
+        })
+        .inner(xrefs_area);
+
+    // Render the block first
+    f.render_widget(
+        Block::default()
+            .title(format!("XRefs ({} found)", app.xrefs.len()))
+            .borders(Borders::ALL)
+            .border_style(if app.active_pane == Pane::XRefs {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default()
+            }),
+        xrefs_area,
+    );
+
+    // Split the inner area for query bar and XRefs list
+    let xrefs_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // Query bar takes just one line
+            Constraint::Min(1),    // XRefs list takes the rest
+        ])
+        .split(xrefs_inner_area);
+
+    // Always render the query bar, but style it differently when not in XRef mode
+    let query_text = if app.xref_mode {
+        format!("Address: {}", app.xref_query)
+    } else {
+        "Press 'x' to enter address".to_string()
+    };
+
+    let query_style = if app.xref_mode {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    let query_bar = Paragraph::new(query_text).style(query_style);
+
+    f.render_widget(query_bar, xrefs_chunks[0]);
+
+    // XRefs list
+    let xrefs_height = xrefs_chunks[1].height as usize;
+
+    let start_idx = app.xref_scroll.saturating_sub(xrefs_height / 2);
+    let end_idx = (start_idx + xrefs_height).min(app.xrefs.len());
+
+    let xref_items: Vec<ListItem> = app.xrefs[start_idx..end_idx]
+        .iter()
+        .map(|xref| {
+            // Create a styled line for each XRef
+            let mut spans = Vec::new();
+
+            // Add address
+            spans.push(Span::styled(
+                format!("{:X}: ", xref.from_address),
+                Style::default().fg(Color::White),
+            ));
+
+            // Add XRef type indicator
+            let (indicator, color) = match xref.kind {
+                XRefKind::Call => ("CALL", Color::Green),
+                XRefKind::Jump => ("JMP", Color::Blue),
+                XRefKind::DataRef => ("DATA", Color::Magenta),
+            };
+
+            spans.push(Span::styled(
+                format!("[{}] ", indicator),
+                Style::default().fg(color),
+            ));
+
+            // Add instruction
+            spans.push(Span::raw(&xref.instruction));
+
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+
+    let xrefs_list =
+        List::new(xref_items).highlight_style(Style::default().add_modifier(Modifier::BOLD));
+
+    let mut xref_state = app.xref_state.clone();
+    if app.xref_scroll >= start_idx && app.xref_scroll < end_idx {
+        xref_state.select(Some(app.xref_scroll - start_idx));
+    }
+
+    f.render_stateful_widget(xrefs_list, xrefs_chunks[1], &mut xref_state);
+
     if app.show_help {
         let help_text = vec![
             "Help:",
@@ -750,10 +1034,11 @@ fn ui(f: &mut Frame, app: &App) {
             "u/d - Half page up/down",
             "g/G - Jump to top/bottom",
             "/ - Search symbols",
-            "Enter - Select symbol",
+            "x - Find XRefs",
+            "Enter - Select item",
             "",
-            "In search mode:",
-            "Esc - Exit search",
+            "In search/XRef mode:",
+            "Esc - Exit mode",
             "Backspace - Delete character",
         ];
 
