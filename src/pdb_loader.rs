@@ -1,4 +1,20 @@
+use anyhow::Result;
+use pdb::{PDB, Source};
 use std::{ffi::c_void, fmt, fs::File};
+
+#[cfg(not(target_os = "linux"))]
+pub type PDBSrc = PDB<'static, File>;
+#[cfg(not(target_os = "linux"))]
+pub fn load(file: File) -> Result<PDBSrc> {
+    Ok(PDB::open(file)?)
+}
+
+#[cfg(target_os = "linux")]
+pub type PDBSrc = PDB<'static, MemmapSource>;
+#[cfg(target_os = "linux")]
+pub fn load(file: File) -> Result<PDBSrc> {
+    Ok(PDB::open(MemmapSource::new(file))?)
+}
 
 pub struct MemmapSource {
     file: File,

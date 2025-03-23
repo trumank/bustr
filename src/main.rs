@@ -8,7 +8,7 @@ use iced_x86::{
     IntelFormatter,
 };
 use patternsleuth_image::image::{Image, ImageBuilder};
-use pdb::{FallibleIterator, PDB, SymbolData};
+use pdb::{FallibleIterator, SymbolData};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fs;
@@ -71,12 +71,9 @@ impl SymbolInfo {
 }
 
 // Function to load debug symbols from PDB file
-fn load_pdb_symbols(
-    image_base: u64,
-    pdb_path: &Path,
-) -> Result<Vec<SymbolInfo>, DisassemblerError> {
+fn load_pdb_symbols(image_base: u64, pdb_path: &Path) -> anyhow::Result<Vec<SymbolInfo>> {
     let file = fs::File::open(pdb_path)?;
-    let mut pdb = PDB::open(pdb_loader::MemmapSource::new(file))?;
+    let mut pdb = pdb_loader::load(file)?;
 
     let symbol_table = pdb.global_symbols()?;
     let address_map = pdb.address_map()?;
