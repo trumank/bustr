@@ -52,6 +52,8 @@ pub struct App<'data> {
     pub xrefs: Vec<XRefInfo>,
     pub xref_scroll: usize,
     pub xref_state: ListState,
+    pub goto_mode: bool,
+    pub goto_query: String,
 }
 
 #[derive(PartialEq)]
@@ -118,6 +120,8 @@ impl<'data> App<'data> {
             xrefs: Vec::new(),
             xref_scroll: 0,
             xref_state,
+            goto_mode: false,
+            goto_query: String::new(),
         }
     }
 
@@ -513,6 +517,37 @@ impl<'data> App<'data> {
             }
         }
     }
+
+    // Add methods for goto functionality
+    pub fn toggle_goto_mode(&mut self) {
+        self.goto_mode = !self.goto_mode;
+        if self.goto_mode {
+            self.goto_query.clear();
+        }
+    }
+
+    pub fn add_to_goto_query(&mut self, c: char) {
+        if self.goto_mode {
+            self.goto_query.push(c);
+        }
+    }
+
+    pub fn backspace_goto_query(&mut self) {
+        if self.goto_mode && !self.goto_query.is_empty() {
+            self.goto_query.pop();
+        }
+    }
+
+    pub fn submit_goto_query(&mut self) {
+        if self.goto_mode && !self.goto_query.is_empty() {
+            // Parse the address from the query
+            if let Ok(addr) = u64::from_str_radix(self.goto_query.trim_start_matches("0x"), 16) {
+                self.set_current_address(addr);
+                self.active_pane = Pane::Disassembly;
+                self.goto_mode = false;
+            }
+        }
+    }
 }
 
 pub fn run_app<'data, B: Backend>(
@@ -562,7 +597,19 @@ pub fn run_app<'data, B: Backend>(
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-                    if app.active_pane == Pane::XRefs && app.xref_mode && !ctrl {
+
+                    // Handle goto mode
+                    if app.goto_mode && !ctrl {
+                        match key.code {
+                            KeyCode::Esc => app.toggle_goto_mode(),
+                            KeyCode::Backspace => app.backspace_goto_query(),
+                            KeyCode::Enter => app.submit_goto_query(),
+                            KeyCode::Char(c) if c.is_ascii_hexdigit() || c == 'x' => {
+                                app.add_to_goto_query(c)
+                            }
+                            _ => {}
+                        }
+                    } else if app.active_pane == Pane::XRefs && app.xref_mode && !ctrl {
                         match key.code {
                             KeyCode::Esc => app.toggle_xref_mode(),
                             KeyCode::Backspace => app.backspace_xref_query(),
@@ -591,6 +638,9 @@ pub fn run_app<'data, B: Backend>(
 
                             KeyCode::Char('h') if ctrl => app.active_pane = Pane::Disassembly,
                             KeyCode::Char('l') if ctrl => app.active_pane = Pane::Symbols,
+                            KeyCode::Char('g') if ctrl => {
+                                app.toggle_goto_mode();
+                            }
 
                             KeyCode::Char('?') | KeyCode::Char('h') => app.toggle_help(),
                             KeyCode::Tab => app.toggle_pane(),
@@ -1020,6 +1070,47 @@ fn ui(f: &mut Frame, app: &App) {
 
     f.render_stateful_widget(xrefs_list, xrefs_chunks[1], &mut xref_state);
 
+    // If in goto mode, show the goto dialog
+    if app.goto_mode {
+        // Create a centered dialog box
+        let dialog_area = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(
+                [
+                    Constraint::Percentage(40),
+                    Constraint::Length(3),
+                    Constraint::Percentage(40),
+                ]
+                .as_ref(),
+            )
+            .split(f.size())[1];
+
+        let dialog_area = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(
+                [
+                    Constraint::Percentage(30),
+                    Constraint::Percentage(40),
+                    Constraint::Percentage(30),
+                ]
+                .as_ref(),
+            )
+            .split(dialog_area)[1];
+
+        // Create the goto input box
+        let goto_input = Paragraph::new(format!("{}", app.goto_query))
+            .block(
+                Block::default()
+                    .title("Go to address (hex)")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Yellow)),
+            )
+            .style(Style::default().fg(Color::Yellow));
+
+        // Render the dialog
+        f.render_widget(goto_input, dialog_area);
+    }
+
     if app.show_help {
         let help_text = vec![
             "Help:",
@@ -1032,9 +1123,10 @@ fn ui(f: &mut Frame, app: &App) {
             "g/G - Jump to top/bottom",
             "/ - Search symbols",
             "x - Find XRefs",
+            "Ctrl+G - Go to address",
             "Enter - Select item",
             "",
-            "In search/XRef mode:",
+            "In search/XRef/goto mode:",
             "Esc - Exit mode",
             "Backspace - Delete character",
         ];
