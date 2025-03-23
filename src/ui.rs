@@ -149,12 +149,13 @@ impl<'data> App<'data> {
         match self.active_pane {
             Pane::Disassembly => {
                 if let Some(mut selected) = self.disassembly_state.selected() {
-                    if selected > 0 {
+                    if selected > 10 {
                         selected -= 1;
                     } else if !self.disassembly.is_empty() {
-                        // TODO prepend
-                        //self.append_disassembly(3);
-                        //selected += 1;
+                        let new_lines = self.prepend_disassembly(3);
+
+                        selected -= 1 - new_lines;
+                        *self.disassembly_state.offset_mut() += new_lines;
                     }
                     self.disassembly_state.select(Some(selected));
                 }
@@ -546,11 +547,55 @@ impl<'data> App<'data> {
     /// load at least new_lines and prepend them to the current disassembly
     /// return how many lines were actually added
     /// also replaces first N lines because they could be improperly disassembled
-    pub fn prepend_assembly(&mut self, new_lines: usize) -> usize {
+    pub fn prepend_disassembly(&mut self, new_lines: usize) -> usize {
         if let Some(binary_data) = &self.binary_data {
-            const REPLACE_BYTES: usize = 30;
+            const REPLACE_BYTES: usize = 100;
 
-            iter_blocks(&self.disassembly);
+            let mut block_iter = iter_blocks(&self.disassembly);
+
+            // find first block so we know how far back to start disassembling
+            if let Some(first_block) = block_iter.next() {
+                let first_address = first_block.address;
+
+                //  0  B0D   | CC                   | int3
+                //  1  B0E   | CC                   | int3
+                //  2  B0F   | CC                   | int3
+                //  3
+                //  4        ; comment line
+                //  5
+                //  6  B10   | 48 83 EC 38          |  sub rsp, 38h
+                //  7  B14   | 4C 8B 4C 24 38       |  mov r9, [rsp+38h]
+                //  8  B19   | 48 8D 05 48 99 00 00 |  lea rax, [141017468h]
+                //  9  B20   | 41 B8 8E 01 00 00    |  mov r8d, 18Eh
+
+                // find boundary of blocks to replace
+                if let Some(until) = block_iter
+                    .find(|block| block.address_range().end >= first_address + REPLACE_BYTES as u64)
+                {
+                    let mut new_dis =
+                        crate::disassemble_range(binary_data, first_address - 30, &mut |dis| {
+                            assert!(dis.len() < 1000);
+                            dis.last().unwrap().address_block() != until.address_range().end
+                        })
+                        .unwrap();
+
+                    assert_eq!(
+                        new_dis.last().unwrap().address_block(),
+                        until.address_range().end
+                    );
+
+                    drop(block_iter);
+
+                    new_dis.pop();
+
+                    let remove = until.index_range().end;
+                    let new_lines = new_dis.len() - remove;
+                    self.disassembly.splice(..remove, new_dis);
+                    return new_lines;
+                }
+                todo!("asdf1");
+            }
+            todo!("asdf2");
 
             //if let Some(first) = self.disassembly.iter().find_map(|l| l.address()) {
             //    let new_dis =
@@ -620,7 +665,7 @@ pub fn run_app<'data, B: Backend>(
                 terminal.size().ok().map(|s| s.height as usize),
                 &app.binary_data,
             ) {
-                match crate::disassemble_range(binary_data, app.current_address - 200, &mut |dis| {
+                match crate::disassemble_range(binary_data, app.current_address - 16, &mut |dis| {
                     dis.len() < height - 10
                 }) {
                     Ok(disassembly) => {

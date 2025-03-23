@@ -297,7 +297,7 @@ pub fn disassemble_range(
     let mut instruction = Instruction::default();
 
     // Disassemble instructions until we have enough lines or can't decode anymore
-    while decoder.can_decode() && decode_while(&result) {
+    while decoder.can_decode() {
         // Decode instruction
         decoder.decode_out(&mut instruction);
 
@@ -379,6 +379,10 @@ pub fn disassemble_range(
         }
 
         result.push(line);
+
+        if !decode_while(&result) {
+            break;
+        }
     }
 
     Ok(result)
