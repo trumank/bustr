@@ -29,7 +29,6 @@ use std::{
 pub struct App<'data> {
     pub disassembly: Vec<DisassemblyLine>,
     pub symbols: Vec<SymbolInfo>,
-    pub current_scroll: usize,
     pub symbol_scroll: usize,
     pub selected_symbol_index: Option<usize>,
     pub show_help: bool,
@@ -92,7 +91,6 @@ impl<'data> App<'data> {
         Self {
             disassembly: Vec::new(),
             symbols: Vec::new(),
-            current_scroll: 0,
             symbol_scroll: 0,
             selected_symbol_index: None,
             show_help: false,
@@ -150,13 +148,15 @@ impl<'data> App<'data> {
     pub fn scroll_up(&mut self) {
         match self.active_pane {
             Pane::Disassembly => {
-                if self.current_scroll > 0 {
-                    self.current_scroll -= 1;
-                    self.disassembly_state.select(Some(self.current_scroll));
-                } else if !self.disassembly.is_empty() {
-                    if let Some(prev_addr) = self.find_previous_address() {
-                        self.set_current_address(prev_addr);
+                if let Some(mut selected) = self.disassembly_state.selected() {
+                    if selected > 0 {
+                        selected -= 1;
+                    } else if !self.disassembly.is_empty() {
+                        // TODO prepend
+                        //self.append_disassembly(3);
+                        //selected += 1;
                     }
+                    self.disassembly_state.select(Some(selected));
                 }
             }
             Pane::Symbols => {
@@ -179,13 +179,14 @@ impl<'data> App<'data> {
     pub fn scroll_down(&mut self) {
         match self.active_pane {
             Pane::Disassembly => {
-                if self.current_scroll < self.disassembly.len().saturating_sub(1) {
-                    self.current_scroll += 1;
-                    self.disassembly_state.select(Some(self.current_scroll));
-                } else if !self.disassembly.is_empty() {
-                    if let Some(next_addr) = self.find_next_address() {
-                        self.set_current_address(next_addr);
+                if let Some(mut selected) = self.disassembly_state.selected() {
+                    if selected < self.disassembly.len().saturating_sub(1) {
+                        selected += 1;
+                    } else if !self.disassembly.is_empty() {
+                        self.append_disassembly(3);
+                        selected += 1;
                     }
+                    self.disassembly_state.select(Some(selected));
                 }
             }
             Pane::Symbols => {
@@ -208,18 +209,20 @@ impl<'data> App<'data> {
     pub fn page_up(&mut self, page_size: usize) {
         match self.active_pane {
             Pane::Disassembly => {
-                if self.current_scroll > page_size {
-                    self.current_scroll -= page_size;
-                    self.disassembly_state.select(Some(self.current_scroll));
-                } else {
-                    self.current_scroll = 0;
-                    self.disassembly_state.select(Some(0));
+                if let Some(mut selected) = self.disassembly_state.selected() {
+                    if selected > page_size {
+                        selected -= page_size;
+                    } else {
+                        selected = 0;
 
-                    if !self.disassembly.is_empty() {
-                        self.set_current_address(
-                            self.current_address.saturating_sub(page_size as u64 * 16),
-                        );
+                        if !self.disassembly.is_empty() {
+                            // TODO prepend disassembly
+                            //self.set_current_address(
+                            //    self.current_address.saturating_sub(page_size as u64 * 16),
+                            //);
+                        }
                     }
+                    self.disassembly_state.select(Some(selected));
                 }
             }
             Pane::Symbols => {
@@ -238,17 +241,18 @@ impl<'data> App<'data> {
     pub fn page_down(&mut self, page_size: usize) {
         match self.active_pane {
             Pane::Disassembly => {
-                let max = self.disassembly.len().saturating_sub(1);
-                if self.current_scroll + page_size < max {
-                    self.current_scroll += page_size;
-                    self.disassembly_state.select(Some(self.current_scroll));
-                } else {
-                    self.current_scroll = max;
-                    self.disassembly_state.select(Some(max));
-
-                    if !self.disassembly.is_empty() {
-                        self.set_current_address(self.current_address + page_size as u64 * 16);
+                if let Some(mut selected) = self.disassembly_state.selected() {
+                    let max = self.disassembly.len().saturating_sub(1);
+                    if selected + page_size < max {
+                        selected += page_size;
+                    } else {
+                        if !self.disassembly.is_empty() {
+                            self.append_disassembly(page_size + 3);
+                        }
+                        let max = self.disassembly.len().saturating_sub(1);
+                        selected = (selected + page_size).min(max);
                     }
+                    self.disassembly_state.select(Some(selected));
                 }
             }
             Pane::Symbols => {
@@ -302,24 +306,14 @@ impl<'data> App<'data> {
     fn find_previous_address(&self) -> Option<u64> {
         self.disassembly
             .iter()
-            .find_map(|line| match line {
-                DisassemblyLine::Instruction { address, .. } => Some(address),
-                _ => None,
-            })
-            .map(|first_instr| first_instr.saturating_sub(4))
+            .rev()
+            .find_map(|l| l.address().filter(|a| *a < self.current_address))
     }
 
     fn find_next_address(&self) -> Option<u64> {
         self.disassembly
             .iter()
-            .rev()
-            .find_map(|line| match line {
-                DisassemblyLine::Instruction { address, bytes, .. } => {
-                    Some((*address, bytes.len() as u64))
-                }
-                _ => None,
-            })
-            .map(|last_instr| last_instr.0 + last_instr.1)
+            .find_map(|l| l.address().filter(|a| *a > self.current_address))
     }
 
     // Method to jump to the top of the current pane
@@ -330,7 +324,7 @@ impl<'data> App<'data> {
                 if let Some(first_addr) = self.find_first_address() {
                     self.set_current_address(first_addr);
                 }
-                self.current_scroll = 0;
+                *self.disassembly_state.offset_mut() = 0;
                 self.disassembly_state.select(Some(0));
             }
             Pane::Symbols => {
@@ -548,6 +542,70 @@ impl<'data> App<'data> {
             }
         }
     }
+
+    /// load at least new_lines and prepend them to the current disassembly
+    /// return how many lines were actually added
+    /// also replaces first N lines because they could be improperly disassembled
+    pub fn prepend_assembly(&mut self, new_lines: usize) -> usize {
+        if let Some(binary_data) = &self.binary_data {
+            const REPLACE_BYTES: usize = 30;
+
+            iter_blocks(&self.disassembly);
+
+            //if let Some(first) = self.disassembly.iter().find_map(|l| l.address()) {
+            //    let new_dis =
+            //        crate::disassemble_range(binary_data, last, &mut |dis| dis.len() < new_lines)
+            //            .unwrap();
+            //    let len = new_dis.len();
+            //    self.disassembly.extend(new_dis);
+            //    return len;
+            //}
+        }
+        0
+    }
+
+    pub fn append_disassembly(&mut self, new_lines: usize) {
+        if let Some(binary_data) = &self.binary_data {
+            if let Some(last) = self.disassembly.iter().rev().find_map(|l| l.address_end()) {
+                let new_dis =
+                    crate::disassemble_range(binary_data, last, &mut |dis| dis.len() < new_lines)
+                        .unwrap();
+                self.disassembly.extend(new_dis);
+            }
+        }
+    }
+}
+
+struct DisBlock<'d> {
+    /// index of first line in block
+    index: usize,
+    /// address of all lines in block
+    address: u64,
+    block: &'d [DisassemblyLine],
+}
+impl DisBlock<'_> {
+    fn address_range(&self) -> std::ops::Range<u64> {
+        self.address..self.block.iter().find_map(|l| l.address_end()).unwrap()
+    }
+    fn index_range(&self) -> std::ops::Range<usize> {
+        self.index..self.index + self.block.len()
+    }
+}
+
+/// iterate over blocks of disassembly
+fn iter_blocks(disassembly: &[DisassemblyLine]) -> impl Iterator<Item = DisBlock<'_>> {
+    let mut index = 0;
+    disassembly
+        .chunk_by(|a, b| a.address_block() == b.address_block())
+        .map(move |block| {
+            let r = DisBlock {
+                index,
+                address: block[0].address_block(),
+                block,
+            };
+            index += block.len();
+            r
+        })
 }
 
 pub fn run_app<'data, B: Backend>(
@@ -562,22 +620,17 @@ pub fn run_app<'data, B: Backend>(
                 terminal.size().ok().map(|s| s.height as usize),
                 &app.binary_data,
             ) {
-                match crate::disassemble_range(binary_data, app.current_address - 200, height + 200)
-                {
+                match crate::disassemble_range(binary_data, app.current_address - 200, &mut |dis| {
+                    dis.len() < height - 10
+                }) {
                     Ok(disassembly) => {
                         let selected = disassembly
                             .iter()
-                            .rposition(|l| match l {
-                                DisassemblyLine::Instruction { address, .. } => {
-                                    *address <= app.current_address
-                                }
-                                _ => false,
-                            })
+                            .rposition(|l| l.address().is_some_and(|a| a <= app.current_address))
                             .unwrap_or(0);
                         app.set_disassembly(disassembly);
                         app.disassembly_state.select(Some(selected));
                         *app.disassembly_state.offset_mut() = selected.saturating_sub(15);
-                        app.current_scroll = 0;
                     }
                     Err(e) => {
                         eprintln!("Error refreshing disassembly: {}", e);
@@ -587,7 +640,7 @@ pub fn run_app<'data, B: Backend>(
             }
         }
 
-        terminal.draw(|f| ui(f, &app))?;
+        terminal.draw(|f| ui(f, &mut app))?;
 
         let timeout = tick_rate
             .checked_sub(last_tick.elapsed())
@@ -693,7 +746,7 @@ pub fn run_app<'data, B: Backend>(
     Ok(app)
 }
 
-fn ui(f: &mut Frame, app: &App) {
+fn ui(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(70), Constraint::Percentage(30)].as_ref())
@@ -708,8 +761,8 @@ fn ui(f: &mut Frame, app: &App) {
         .disassembly
         .iter()
         .map(|line| match line {
-            DisassemblyLine::Empty => ListItem::new(""),
-            DisassemblyLine::Symbol(symbol) => {
+            DisassemblyLine::Empty { .. } => ListItem::new(""),
+            DisassemblyLine::Symbol { symbol, .. } => {
                 let style = match symbol.kind {
                     SymbolKind::Function => Style::default().fg(Color::Yellow),
                     SymbolKind::Data => Style::default().fg(Color::Cyan),
@@ -720,7 +773,7 @@ fn ui(f: &mut Frame, app: &App) {
                     Span::styled(symbol.display_name(), style),
                 ]))
             }
-            DisassemblyLine::Text(text) => ListItem::new(Line::from(vec![Span::styled(
+            DisassemblyLine::Text { text, .. } => ListItem::new(Line::from(vec![Span::styled(
                 text,
                 Style::default().fg(Color::White),
             )])),
@@ -821,11 +874,7 @@ fn ui(f: &mut Frame, app: &App) {
         )
         .highlight_style(Style::default().add_modifier(Modifier::BOLD));
 
-    f.render_stateful_widget(
-        disassembly_list,
-        chunks[0],
-        &mut app.disassembly_state.clone(),
-    );
+    f.render_stateful_widget(disassembly_list, chunks[0], &mut app.disassembly_state);
 
     // Symbols pane with integrated search
     let symbols_area = chunks_vert[0];
@@ -960,15 +1009,14 @@ fn ui(f: &mut Frame, app: &App) {
         (items, app.symbols.len(), start_idx, end_idx)
     };
 
-    let symbols_list =
-        List::new(symbol_items).highlight_style(Style::default().add_modifier(Modifier::BOLD));
+    let symbols_list = List::new(symbol_items)
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED));
 
-    let mut symbol_state = app.symbol_state.clone();
     if app.symbol_scroll >= start_idx && app.symbol_scroll < end_idx {
-        symbol_state.select(Some(app.symbol_scroll - start_idx));
+        app.symbol_state.select(Some(app.symbol_scroll - start_idx));
     }
 
-    f.render_stateful_widget(symbols_list, inner_chunks[1], &mut symbol_state);
+    f.render_stateful_widget(symbols_list, inner_chunks[1], &mut app.symbol_state);
 
     // XRefs pane (bottom right)
     let xrefs_area = chunks_vert[1];

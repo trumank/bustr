@@ -23,3 +23,4 @@ color-eyre = "0.6.3"
 patternsleuth_image = { git = "https://github.com/trumank/patternsleuth.git", branch = "refactor", version = "0.1.0", features = ["image-pe"] }
 patternsleuth_scanner = { git = "https://github.com/trumank/patternsleuth.git", branch = "refactor", version = "0.1.0" }
 anyhow = "1.0.97"
+itertools = "0.14.0"
