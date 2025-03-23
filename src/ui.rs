@@ -527,7 +527,8 @@ pub fn run_app<'data, B: Backend>(
                 terminal.size().ok().map(|s| s.height as usize),
                 &app.binary_data,
             ) {
-                match crate::disassemble_range(binary_data, app.current_address - 100, height) {
+                match crate::disassemble_range(binary_data, app.current_address - 200, height + 200)
+                {
                     Ok(disassembly) => {
                         let selected = disassembly
                             .iter()
@@ -540,7 +541,7 @@ pub fn run_app<'data, B: Backend>(
                             .unwrap_or(0);
                         app.set_disassembly(disassembly);
                         app.disassembly_state.select(Some(selected));
-                        *app.disassembly_state.offset_mut() = selected.saturating_sub(10);
+                        *app.disassembly_state.offset_mut() = selected.saturating_sub(15);
                         app.current_scroll = 0;
                     }
                     Err(e) => {
@@ -560,8 +561,8 @@ pub fn run_app<'data, B: Backend>(
         if crossterm::event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
-                    // Handle XRef mode separately
-                    if app.active_pane == Pane::XRefs && app.xref_mode {
+                    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                    if app.active_pane == Pane::XRefs && app.xref_mode && !ctrl {
                         match key.code {
                             KeyCode::Esc => app.toggle_xref_mode(),
                             KeyCode::Backspace => app.backspace_xref_query(),
@@ -571,7 +572,7 @@ pub fn run_app<'data, B: Backend>(
                             }
                             _ => {}
                         }
-                    } else if app.search_mode {
+                    } else if app.active_pane == Pane::Symbols && app.search_mode && !ctrl {
                         match key.code {
                             KeyCode::Esc => app.toggle_search(),
                             KeyCode::Backspace => app.backspace_search(),
@@ -588,12 +589,8 @@ pub fn run_app<'data, B: Backend>(
                                 break;
                             }
 
-                            KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                app.active_pane = Pane::Disassembly
-                            }
-                            KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                app.active_pane = Pane::Symbols
-                            }
+                            KeyCode::Char('h') if ctrl => app.active_pane = Pane::Disassembly,
+                            KeyCode::Char('l') if ctrl => app.active_pane = Pane::Symbols,
 
                             KeyCode::Char('?') | KeyCode::Char('h') => app.toggle_help(),
                             KeyCode::Tab => app.toggle_pane(),
