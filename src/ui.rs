@@ -20,11 +20,24 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 use std::{
+    collections::VecDeque,
     error::Error,
     io,
     path::PathBuf,
     time::{Duration, Instant},
 };
+
+#[derive(Debug, Clone)]
+struct NavigationEntry {
+    address: u64,
+    scroll_offset: usize,
+}
+
+#[derive(Clone)]
+struct LogEntry {
+    timestamp: Instant,
+    message: String,
+}
 
 pub struct App<'data> {
     pub disassembly: Vec<DisassemblyLine>,
@@ -33,6 +46,7 @@ pub struct App<'data> {
     pub selected_symbol_index: Option<usize>,
     pub show_help: bool,
     pub should_quit: bool,
+    pub show_log: bool,
 
     pub active_pane: Pane,
     pub search_mode: bool,
@@ -53,6 +67,12 @@ pub struct App<'data> {
     pub xref_state: ListState,
     pub goto_mode: bool,
     pub goto_query: String,
+
+    navigation_stack: Vec<NavigationEntry>,
+    navigation_index: usize,
+
+    log_entries: VecDeque<LogEntry>,
+    log_state: ListState,
 }
 
 #[derive(PartialEq)]
@@ -60,6 +80,7 @@ pub enum Pane {
     Disassembly,
     Symbols,
     XRefs,
+    DebugLog,
 }
 
 #[derive(Clone)]
@@ -95,6 +116,7 @@ impl<'data> App<'data> {
             selected_symbol_index: None,
             show_help: false,
             should_quit: false,
+            show_log: true,
 
             active_pane: Pane::Disassembly,
             search_mode: false,
@@ -120,6 +142,12 @@ impl<'data> App<'data> {
             xref_state,
             goto_mode: false,
             goto_query: String::new(),
+
+            navigation_stack: Vec::new(),
+            navigation_index: 0,
+
+            log_entries: VecDeque::with_capacity(1000),
+            log_state: ListState::default(),
         }
     }
 
@@ -139,6 +167,24 @@ impl<'data> App<'data> {
     pub fn set_current_address(&mut self, address: u64) {
         self.current_address = address;
         self.needs_refresh = true;
+
+        // Only push to navigation stack if this is a new navigation (not from history)
+        if !self.navigation_stack.is_empty() {
+            self.navigation_index += 1;
+        }
+        let entry = NavigationEntry {
+            address,
+            scroll_offset: self.disassembly_state.offset(),
+        };
+        if let Some(existing) = self.navigation_stack.get_mut(self.navigation_index) {
+            *existing = entry;
+        } else {
+            self.navigation_stack.push(entry);
+        }
+        self.log(format!(
+            "nav # {} stack {:x?}",
+            self.navigation_index, self.navigation_stack
+        ));
     }
 
     pub fn set_binary_data(&mut self, binary_data: BinaryData<'data>) {
@@ -159,6 +205,16 @@ impl<'data> App<'data> {
                         *self.disassembly_state.offset_mut() += new_lines;
                     }
                     self.disassembly_state.select(Some(selected));
+
+                    // Update the current navigation entry's scroll offset
+                    if let Some(entry) = self.navigation_stack.get_mut(self.navigation_index) {
+                        entry.scroll_offset = self.disassembly_state.offset();
+                        entry.address = self.disassembly[selected].address_block();
+                    }
+                    self.log(format!(
+                        "nav # {} stack {:x?}",
+                        self.navigation_index, self.navigation_stack
+                    ));
                 }
             }
             Pane::Symbols => {
@@ -175,6 +231,12 @@ impl<'data> App<'data> {
                     self.select_xref();
                 }
             }
+            Pane::DebugLog => {
+                let offset = self.log_state.offset_mut();
+                if *offset > 0 {
+                    *offset -= amount.min(*offset);
+                }
+            }
         }
     }
 
@@ -182,14 +244,6 @@ impl<'data> App<'data> {
         match self.active_pane {
             Pane::Disassembly => {
                 if let Some(mut selected) = self.disassembly_state.selected() {
-                    //if selected + amount < self.disassembly.len() {
-                    //    selected += amount;
-                    //} else if !self.disassembly.is_empty() {
-                    //    self.append_disassembly(amount + 3);
-                    //    selected += amount;
-                    //}
-                    //self.disassembly_state.select(Some(selected));
-
                     let max = self.disassembly.len().saturating_sub(1);
                     if selected + amount < max {
                         selected += amount;
@@ -201,6 +255,16 @@ impl<'data> App<'data> {
                         selected = (selected + amount).min(max);
                     }
                     self.disassembly_state.select(Some(selected));
+
+                    // Update the current navigation entry's scroll offset
+                    if let Some(entry) = self.navigation_stack.get_mut(self.navigation_index) {
+                        entry.scroll_offset = self.disassembly_state.offset();
+                        entry.address = self.disassembly[selected].address_block();
+                    }
+                    self.log(format!(
+                        "nav # {} stack {:x?}",
+                        self.navigation_index, self.navigation_stack
+                    ));
                 }
             }
             Pane::Symbols => {
@@ -219,6 +283,13 @@ impl<'data> App<'data> {
                     self.select_xref();
                 }
             }
+            Pane::DebugLog => {
+                let offset = self.log_state.offset_mut();
+                let diff = self.log_entries.len() - *offset;
+                if diff > 1 {
+                    *offset += amount.min(diff - 1);
+                }
+            }
         }
     }
 
@@ -230,7 +301,14 @@ impl<'data> App<'data> {
         self.active_pane = match self.active_pane {
             Pane::Disassembly => Pane::Symbols,
             Pane::Symbols => Pane::XRefs,
-            Pane::XRefs => Pane::Disassembly,
+            Pane::XRefs => {
+                if self.show_log {
+                    Pane::DebugLog
+                } else {
+                    Pane::Disassembly
+                }
+            }
+            Pane::DebugLog => Pane::Disassembly,
         };
     }
 
@@ -288,6 +366,11 @@ impl<'data> App<'data> {
                 self.xref_scroll = 0;
                 self.xref_state.select(Some(0));
             }
+            Pane::DebugLog => {
+                if !self.log_entries.is_empty() {
+                    self.log_state.select(Some(0));
+                }
+            }
         }
     }
 
@@ -314,6 +397,11 @@ impl<'data> App<'data> {
                     let last_idx = self.xrefs.len() - 1;
                     self.xref_scroll = last_idx;
                     self.xref_state.select(Some(last_idx));
+                }
+            }
+            Pane::DebugLog => {
+                if !self.log_entries.is_empty() {
+                    self.log_state.select(Some(self.log_entries.len() - 1));
                 }
             }
         }
@@ -578,6 +666,50 @@ impl<'data> App<'data> {
             }
         }
     }
+
+    pub fn navigate_back(&mut self) {
+        if self.navigation_index > 0 {
+            self.navigation_index -= 1;
+            let entry = &self.navigation_stack[self.navigation_index];
+            self.current_address = entry.address;
+            *self.disassembly_state.offset_mut() = entry.scroll_offset;
+            self.needs_refresh = true;
+        }
+        self.log(format!(
+            "nav # {} stack {:x?}",
+            self.navigation_index, self.navigation_stack
+        ));
+    }
+
+    pub fn navigate_forward(&mut self) {
+        if self.navigation_index < self.navigation_stack.len() - 1 {
+            self.navigation_index += 1;
+            let entry = &self.navigation_stack[self.navigation_index];
+            self.current_address = entry.address;
+            *self.disassembly_state.offset_mut() = entry.scroll_offset;
+            self.needs_refresh = true;
+        }
+        self.log(format!(
+            "nav # {} stack {:x?}",
+            self.navigation_index, self.navigation_stack
+        ));
+    }
+
+    pub fn log(&mut self, message: impl Into<String>) {
+        let entry = LogEntry {
+            timestamp: Instant::now(),
+            message: message.into(),
+        };
+        self.log_entries.push_back(entry);
+        if self.log_entries.len() > 1000 {
+            self.log_entries.pop_front();
+        }
+        self.log_state.scroll_down_by(1);
+    }
+
+    pub fn toggle_log(&mut self) {
+        self.show_log = !self.show_log;
+    }
 }
 
 struct DisBlock<'d> {
@@ -709,7 +841,7 @@ pub fn run_app<'data, B: Backend>(
                                 app.toggle_goto_mode();
                             }
 
-                            KeyCode::Char('?') | KeyCode::Char('h') => app.toggle_help(),
+                            KeyCode::Char('?') => app.toggle_help(),
                             KeyCode::Tab => app.toggle_pane(),
                             KeyCode::Up | KeyCode::Char('k') => app.scroll_up(1),
                             KeyCode::Down | KeyCode::Char('j') => app.scroll_down(1),
@@ -731,8 +863,11 @@ pub fn run_app<'data, B: Backend>(
                             }
                             KeyCode::Char('g') => app.jump_to_top(),
                             KeyCode::Char('G') => app.jump_to_bottom(),
+                            KeyCode::Char('h') if !ctrl => app.navigate_back(),
+                            KeyCode::Char('l') if !ctrl => app.navigate_forward(),
+                            KeyCode::Char('L') => app.toggle_log(),
 
-                            KeyCode::Char('/') => app.toggle_search(), // Start search with /
+                            KeyCode::Char('/') => app.toggle_search(),
                             KeyCode::Char('x') => {
                                 if app.active_pane == Pane::XRefs {
                                     app.toggle_xref_mode();
@@ -761,15 +896,27 @@ pub fn run_app<'data, B: Backend>(
 }
 
 fn ui(f: &mut Frame, app: &mut App) {
-    let chunks = Layout::default()
+    let chunks = if app.show_log {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(80), Constraint::Percentage(20)].as_ref())
+            .split(f.size())
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(100)].as_ref())
+            .split(f.size())
+    };
+
+    let main_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(70), Constraint::Percentage(30)].as_ref())
-        .split(f.size());
+        .split(chunks[0]);
 
     let chunks_vert = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
-        .split(chunks[1]);
+        .split(main_chunks[1]);
 
     let disassembly_items: Vec<ListItem> = app
         .disassembly
@@ -888,7 +1035,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         )
         .highlight_style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED));
 
-    f.render_stateful_widget(disassembly_list, chunks[0], &mut app.disassembly_state);
+    f.render_stateful_widget(disassembly_list, main_chunks[0], &mut app.disassembly_state);
 
     // Symbols pane with integrated search
     let symbols_area = chunks_vert[0];
@@ -1183,6 +1330,8 @@ fn ui(f: &mut Frame, app: &mut App) {
             "PgUp/PgDn - Page up/down",
             "u/d - Half page up/down",
             "g/G - Jump to top/bottom",
+            "h/l - Navigate back/forward",
+            "L - Toggle debug log",
             "/ - Search symbols",
             "x - Find XRefs",
             "Ctrl+G - Go to address",
@@ -1222,6 +1371,39 @@ fn ui(f: &mut Frame, app: &mut App) {
             .split(help_area)[1];
 
         f.render_widget(help_paragraph, help_area);
+    }
+
+    // Add log panel at the bottom if enabled
+    if app.show_log {
+        let log_items: Vec<ListItem> = app
+            .log_entries
+            .iter()
+            .map(|entry| {
+                let elapsed = entry.timestamp.elapsed();
+                let time_str = format!(
+                    "{:02}:{:02}:{:02}",
+                    elapsed.as_secs() / 3600,
+                    (elapsed.as_secs() % 3600) / 60,
+                    elapsed.as_secs() % 60
+                );
+                ListItem::new(format!("[{}] {}", time_str, entry.message))
+            })
+            .collect();
+
+        let log_list = List::new(log_items)
+            .block(
+                Block::default()
+                    .title("Debug Log")
+                    .borders(Borders::ALL)
+                    .border_style(if app.active_pane == Pane::DebugLog {
+                        Style::default().fg(Color::Yellow)
+                    } else {
+                        Style::default()
+                    }),
+            )
+            .highlight_style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED));
+
+        f.render_stateful_widget(log_list, chunks[1], &mut app.log_state);
     }
 }
 
