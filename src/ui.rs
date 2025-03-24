@@ -232,10 +232,7 @@ impl<'data> App<'data> {
                 }
             }
             Pane::DebugLog => {
-                let offset = self.log_state.offset_mut();
-                if *offset > 0 {
-                    *offset -= amount.min(*offset);
-                }
+                self.log_state.scroll_up_by(amount as u16);
             }
         }
     }
@@ -284,11 +281,7 @@ impl<'data> App<'data> {
                 }
             }
             Pane::DebugLog => {
-                let offset = self.log_state.offset_mut();
-                let diff = self.log_entries.len() - *offset;
-                if diff > 1 {
-                    *offset += amount.min(diff - 1);
-                }
+                self.log_state.scroll_down_by(amount as u16);
             }
         }
     }
@@ -704,7 +697,7 @@ impl<'data> App<'data> {
         if self.log_entries.len() > 1000 {
             self.log_entries.pop_front();
         }
-        self.log_state.scroll_down_by(1);
+        self.log_state.select(Some(self.log_entries.len() - 1));
     }
 
     pub fn toggle_log(&mut self) {
