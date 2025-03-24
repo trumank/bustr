@@ -145,16 +145,17 @@ impl<'data> App<'data> {
         self.binary_data = Some(binary_data);
     }
 
-    pub fn scroll_up(&mut self) {
+    pub fn scroll_up(&mut self, amount: usize) {
         match self.active_pane {
             Pane::Disassembly => {
                 if let Some(mut selected) = self.disassembly_state.selected() {
-                    if selected > 10 {
-                        selected -= 1;
+                    // ensure margin of 10 off screen
+                    if selected > 10 + amount {
+                        selected -= amount;
                     } else if !self.disassembly.is_empty() {
-                        let new_lines = self.prepend_disassembly(3);
+                        let new_lines = self.prepend_disassembly(amount + 3);
 
-                        selected -= 1 - new_lines;
+                        selected -= amount - new_lines;
                         *self.disassembly_state.offset_mut() += new_lines;
                     }
                     self.disassembly_state.select(Some(selected));
@@ -162,14 +163,14 @@ impl<'data> App<'data> {
             }
             Pane::Symbols => {
                 if self.symbol_scroll > 0 {
-                    self.symbol_scroll -= 1;
+                    self.symbol_scroll -= amount.min(self.symbol_scroll);
                     self.symbol_state.select(Some(self.symbol_scroll));
                     self.select_symbol();
                 }
             }
             Pane::XRefs => {
                 if self.xref_scroll > 0 {
-                    self.xref_scroll -= 1;
+                    self.xref_scroll -= amount.min(self.xref_scroll);
                     self.xref_state.select(Some(self.xref_scroll));
                     self.select_xref();
                 }
@@ -177,96 +178,46 @@ impl<'data> App<'data> {
         }
     }
 
-    pub fn scroll_down(&mut self) {
+    pub fn scroll_down(&mut self, amount: usize) {
         match self.active_pane {
             Pane::Disassembly => {
                 if let Some(mut selected) = self.disassembly_state.selected() {
-                    if selected < self.disassembly.len().saturating_sub(1) {
-                        selected += 1;
-                    } else if !self.disassembly.is_empty() {
-                        self.append_disassembly(3);
-                        selected += 1;
+                    //if selected + amount < self.disassembly.len() {
+                    //    selected += amount;
+                    //} else if !self.disassembly.is_empty() {
+                    //    self.append_disassembly(amount + 3);
+                    //    selected += amount;
+                    //}
+                    //self.disassembly_state.select(Some(selected));
+
+                    let max = self.disassembly.len().saturating_sub(1);
+                    if selected + amount < max {
+                        selected += amount;
+                    } else {
+                        if !self.disassembly.is_empty() {
+                            self.append_disassembly(amount + 3);
+                        }
+                        let max = self.disassembly.len().saturating_sub(1);
+                        selected = (selected + amount).min(max);
                     }
                     self.disassembly_state.select(Some(selected));
                 }
             }
             Pane::Symbols => {
-                if self.symbol_scroll < self.symbols.len().saturating_sub(1) {
-                    self.symbol_scroll += 1;
+                let diff = self.symbols.len() - self.symbol_scroll;
+                if diff > 1 {
+                    self.symbol_scroll += amount.min(diff - 1);
                     self.symbol_state.select(Some(self.symbol_scroll));
                     self.select_symbol();
                 }
             }
             Pane::XRefs => {
-                if self.xref_scroll < self.xrefs.len().saturating_sub(1) {
-                    self.xref_scroll += 1;
+                let diff = self.xrefs.len() - self.xref_scroll;
+                if diff > 1 {
+                    self.xref_scroll += amount.min(diff - 1);
                     self.xref_state.select(Some(self.xref_scroll));
                     self.select_xref();
                 }
-            }
-        }
-    }
-
-    pub fn page_up(&mut self, page_size: usize) {
-        match self.active_pane {
-            Pane::Disassembly => {
-                if let Some(mut selected) = self.disassembly_state.selected() {
-                    if selected > page_size {
-                        selected -= page_size;
-                    } else {
-                        selected = 0;
-
-                        if !self.disassembly.is_empty() {
-                            // TODO prepend disassembly
-                            //self.set_current_address(
-                            //    self.current_address.saturating_sub(page_size as u64 * 16),
-                            //);
-                        }
-                    }
-                    self.disassembly_state.select(Some(selected));
-                }
-            }
-            Pane::Symbols => {
-                self.symbol_scroll = self.symbol_scroll.saturating_sub(page_size);
-                self.symbol_state.select(Some(self.symbol_scroll));
-                self.select_symbol();
-            }
-            Pane::XRefs => {
-                self.xref_scroll = self.xref_scroll.saturating_sub(page_size);
-                self.xref_state.select(Some(self.xref_scroll));
-                self.select_xref();
-            }
-        }
-    }
-
-    pub fn page_down(&mut self, page_size: usize) {
-        match self.active_pane {
-            Pane::Disassembly => {
-                if let Some(mut selected) = self.disassembly_state.selected() {
-                    let max = self.disassembly.len().saturating_sub(1);
-                    if selected + page_size < max {
-                        selected += page_size;
-                    } else {
-                        if !self.disassembly.is_empty() {
-                            self.append_disassembly(page_size + 3);
-                        }
-                        let max = self.disassembly.len().saturating_sub(1);
-                        selected = (selected + page_size).min(max);
-                    }
-                    self.disassembly_state.select(Some(selected));
-                }
-            }
-            Pane::Symbols => {
-                let max = self.symbols.len().saturating_sub(1);
-                self.symbol_scroll = (self.symbol_scroll + page_size).min(max);
-                self.symbol_state.select(Some(self.symbol_scroll));
-                self.select_symbol();
-            }
-            Pane::XRefs => {
-                let max = self.xrefs.len().saturating_sub(1);
-                self.xref_scroll = (self.xref_scroll + page_size).min(max);
-                self.xref_state.select(Some(self.xref_scroll));
-                self.select_xref();
             }
         }
     }
@@ -551,51 +502,59 @@ impl<'data> App<'data> {
         if let Some(binary_data) = &self.binary_data {
             const REPLACE_BYTES: usize = 100;
 
-            let mut block_iter = iter_blocks(&self.disassembly);
+            let mut added_lines = 0;
 
-            // find first block so we know how far back to start disassembling
-            if let Some(first_block) = block_iter.next() {
-                let first_address = first_block.address;
+            while added_lines <= new_lines {
+                let mut block_iter = iter_blocks(&self.disassembly);
 
-                //  0  B0D   | CC                   | int3
-                //  1  B0E   | CC                   | int3
-                //  2  B0F   | CC                   | int3
-                //  3
-                //  4        ; comment line
-                //  5
-                //  6  B10   | 48 83 EC 38          |  sub rsp, 38h
-                //  7  B14   | 4C 8B 4C 24 38       |  mov r9, [rsp+38h]
-                //  8  B19   | 48 8D 05 48 99 00 00 |  lea rax, [141017468h]
-                //  9  B20   | 41 B8 8E 01 00 00    |  mov r8d, 18Eh
+                // find first block so we know how far back to start disassembling
+                if let Some(first_block) = block_iter.next() {
+                    let first_address = first_block.address;
 
-                // find boundary of blocks to replace
-                if let Some(until) = block_iter
-                    .find(|block| block.address_range().end >= first_address + REPLACE_BYTES as u64)
-                {
-                    let mut new_dis =
-                        crate::disassemble_range(binary_data, first_address - 30, &mut |dis| {
-                            assert!(dis.len() < 1000);
-                            dis.last().unwrap().address_block() != until.address_range().end
-                        })
-                        .unwrap();
+                    //  0  B0D   | CC                   | int3
+                    //  1  B0E   | CC                   | int3
+                    //  2  B0F   | CC                   | int3
+                    //  3
+                    //  4        ; comment line
+                    //  5
+                    //  6  B10   | 48 83 EC 38          |  sub rsp, 38h
+                    //  7  B14   | 4C 8B 4C 24 38       |  mov r9, [rsp+38h]
+                    //  8  B19   | 48 8D 05 48 99 00 00 |  lea rax, [141017468h]
+                    //  9  B20   | 41 B8 8E 01 00 00    |  mov r8d, 18Eh
 
-                    assert_eq!(
-                        new_dis.last().unwrap().address_block(),
-                        until.address_range().end
-                    );
+                    // find boundary of blocks to replace
+                    if let Some(until) = block_iter.find(|block| {
+                        block.address_range().end >= first_address + REPLACE_BYTES as u64
+                    }) {
+                        let mut new_dis =
+                            crate::disassemble_range(binary_data, first_address - 30, &mut |dis| {
+                                assert!(dis.len() < 1000);
+                                dis.last().unwrap().address_block() != until.address_range().end
+                            })
+                            .unwrap();
 
-                    drop(block_iter);
+                        assert_eq!(
+                            new_dis.last().unwrap().address_block(),
+                            until.address_range().end
+                        );
 
-                    new_dis.pop();
+                        drop(block_iter);
 
-                    let remove = until.index_range().end;
-                    let new_lines = new_dis.len() - remove;
-                    self.disassembly.splice(..remove, new_dis);
-                    return new_lines;
+                        new_dis.pop();
+
+                        let removed_lines = until.index_range().end;
+                        added_lines += new_dis.len() - removed_lines;
+
+                        self.disassembly.splice(..removed_lines, new_dis);
+                    } else {
+                        todo!("asdf1");
+                    }
+                } else {
+                    todo!("asdf2");
                 }
-                todo!("asdf1");
             }
-            todo!("asdf2");
+
+            return added_lines;
 
             //if let Some(first) = self.disassembly.iter().find_map(|l| l.address()) {
             //    let new_dis =
@@ -732,8 +691,8 @@ pub fn run_app<'data, B: Backend>(
                             KeyCode::Esc => app.toggle_search(),
                             KeyCode::Backspace => app.backspace_search(),
                             KeyCode::Enter => app.select_symbol(),
-                            KeyCode::Up => app.scroll_up(),
-                            KeyCode::Down => app.scroll_down(),
+                            KeyCode::Up => app.scroll_up(1),
+                            KeyCode::Down => app.scroll_down(1),
                             KeyCode::Char(c) => app.add_to_search(c),
                             _ => {}
                         }
@@ -752,23 +711,23 @@ pub fn run_app<'data, B: Backend>(
 
                             KeyCode::Char('?') | KeyCode::Char('h') => app.toggle_help(),
                             KeyCode::Tab => app.toggle_pane(),
-                            KeyCode::Up | KeyCode::Char('k') => app.scroll_up(),
-                            KeyCode::Down | KeyCode::Char('j') => app.scroll_down(),
+                            KeyCode::Up | KeyCode::Char('k') => app.scroll_up(1),
+                            KeyCode::Down | KeyCode::Char('j') => app.scroll_down(1),
                             KeyCode::PageUp => {
                                 let height = terminal.size()?.height as usize;
-                                app.page_up(height - 2);
+                                app.scroll_up(height - 2);
                             }
                             KeyCode::PageDown => {
                                 let height = terminal.size()?.height as usize;
-                                app.page_down(height - 2);
+                                app.scroll_down(height - 2);
                             }
                             KeyCode::Char('d') => {
                                 let height = terminal.size()?.height as usize;
-                                app.page_down((height - 2) / 2); // Half page down
+                                app.scroll_down((height - 2) / 2); // Half page down
                             }
                             KeyCode::Char('u') => {
                                 let height = terminal.size()?.height as usize;
-                                app.page_up((height - 2) / 2); // Half page up
+                                app.scroll_up((height - 2) / 2); // Half page up
                             }
                             KeyCode::Char('g') => app.jump_to_top(),
                             KeyCode::Char('G') => app.jump_to_bottom(),
@@ -927,7 +886,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                     Style::default()
                 }),
         )
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED));
 
     f.render_stateful_widget(disassembly_list, chunks[0], &mut app.disassembly_state);
 
@@ -1163,8 +1122,8 @@ fn ui(f: &mut Frame, app: &mut App) {
         })
         .collect();
 
-    let xrefs_list =
-        List::new(xref_items).highlight_style(Style::default().add_modifier(Modifier::BOLD));
+    let xrefs_list = List::new(xref_items)
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED));
 
     let mut xref_state = app.xref_state.clone();
     if app.xref_scroll >= start_idx && app.xref_scroll < end_idx {
