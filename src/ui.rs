@@ -665,17 +665,27 @@ pub fn run_app<'data, B: Backend>(
                 terminal.size().ok().map(|s| s.height as usize),
                 &app.binary_data,
             ) {
-                match crate::disassemble_range(binary_data, app.current_address - 16, &mut |dis| {
-                    dis.len() < height - 10
+                const FROM_TOP: usize = 15;
+
+                let mut first_line = None;
+                match crate::disassemble_range(binary_data, app.current_address - 50, &mut |dis| {
+                    if first_line.is_none() {
+                        first_line = dis
+                            .iter()
+                            .position(|l| l.address().is_some_and(|a| a > app.current_address))
+                            .map(|l| l - 1)
+                    }
+                    if let Some(first_line) = first_line {
+                        dis.len() + FROM_TOP < height + first_line
+                    } else {
+                        true
+                    }
                 }) {
                     Ok(disassembly) => {
-                        let selected = disassembly
-                            .iter()
-                            .rposition(|l| l.address().is_some_and(|a| a <= app.current_address))
-                            .unwrap_or(0);
+                        let selected = first_line.unwrap_or(0);
                         app.set_disassembly(disassembly);
                         app.disassembly_state.select(Some(selected));
-                        *app.disassembly_state.offset_mut() = selected.saturating_sub(15);
+                        *app.disassembly_state.offset_mut() = selected.saturating_sub(FROM_TOP);
                     }
                     Err(e) => {
                         eprintln!("Error refreshing disassembly: {}", e);
