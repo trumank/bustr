@@ -168,6 +168,7 @@ pub enum DisassemblyLine {
         bytes: Vec<u8>,
         instruction: String,
         comments: Vec<DisassemblyComment>,
+        referenced_address: Option<u64>,
     },
 }
 impl DisassemblyLine {
@@ -339,12 +340,22 @@ pub fn disassemble_range(
         let mut instr_text = String::new();
         formatter.format(&instruction, &mut PlainFormatterOutput(&mut instr_text));
 
+        let branch_target = instruction.near_branch_target();
+        let referenced_address = if instruction.is_ip_rel_memory_operand() {
+            Some(instruction.ip_rel_memory_address())
+        } else if branch_target != 0 {
+            Some(branch_target)
+        } else {
+            None
+        };
+
         // Create a structured instruction line
         let mut line = DisassemblyLine::Instruction {
             address,
             bytes: instr_bytes.to_vec(),
             instruction: instr_text,
             comments: Vec::new(),
+            referenced_address,
         };
 
         // Add branch target comments if applicable

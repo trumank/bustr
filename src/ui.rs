@@ -456,13 +456,36 @@ impl<'data> App<'data> {
         jump_to_top(&mut self.symbol_list_state);
     }
 
-    // Add methods for XRef functionality
     pub fn toggle_xref_mode(&mut self) {
-        if self.active_pane == Pane::XRefs {
-            self.xref_mode = !self.xref_mode;
-            if self.xref_mode {
-                self.xref_query.clear();
+        match self.active_pane {
+            Pane::Disassembly => {
+                if let Some(address) = self
+                    .disassembly_state
+                    .selected()
+                    .and_then(|s| self.disassembly.get(s))
+                    .and_then(|l| l.address())
+                {
+                    self.find_xrefs(address);
+                    self.active_pane = Pane::XRefs;
+                }
             }
+            Pane::Symbols => {
+                if let Some(symbol) = self
+                    .symbol_list_state
+                    .selected()
+                    .and_then(|s| self.symbols.get(s))
+                {
+                    self.find_xrefs(symbol.address);
+                    self.active_pane = Pane::XRefs;
+                }
+            }
+            Pane::XRefs => {
+                self.xref_mode = !self.xref_mode;
+                if self.xref_mode {
+                    self.xref_query.clear();
+                }
+            }
+            _ => {}
         }
     }
 
@@ -682,6 +705,21 @@ impl<'data> App<'data> {
     pub fn toggle_log(&mut self) {
         self.show_log = !self.show_log;
     }
+
+    pub fn follow_address_reference(&mut self) {
+        if self.active_pane == Pane::Disassembly {
+            if let Some(DisassemblyLine::Instruction {
+                referenced_address: Some(addr),
+                ..
+            }) = self
+                .disassembly_state
+                .selected()
+                .and_then(|s| self.disassembly.get(s))
+            {
+                self.set_current_address(*addr);
+            }
+        }
+    }
 }
 
 struct DisBlock<'d> {
@@ -806,6 +844,7 @@ pub fn run_app<'data, B: Backend>(
                             KeyCode::Esc => app.toggle_search(),
                             KeyCode::Backspace => app.backspace_search(),
                             KeyCode::Enter => app.select_symbol(),
+                            KeyCode::Tab => app.toggle_pane(),
                             KeyCode::Up => app.scroll_up(1),
                             KeyCode::Down => app.scroll_down(1),
                             KeyCode::Char(c) => app.add_to_search(c),
@@ -852,9 +891,7 @@ pub fn run_app<'data, B: Backend>(
 
                             KeyCode::Char('/') => app.toggle_search(),
                             KeyCode::Char('x') => {
-                                if app.active_pane == Pane::XRefs {
-                                    app.toggle_xref_mode();
-                                }
+                                app.toggle_xref_mode();
                             }
                             KeyCode::Enter => {
                                 if app.active_pane == Pane::Symbols {
@@ -863,6 +900,7 @@ pub fn run_app<'data, B: Backend>(
                                     app.select_xref();
                                 }
                             }
+                            KeyCode::Char('f') => app.follow_address_reference(),
                             _ => {}
                         }
                     }
@@ -926,6 +964,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                 bytes,
                 instruction,
                 comments,
+                ..
             } => {
                 let mut spans = vec![Span::styled(
                     format!("{:016X} ", address),
@@ -1302,6 +1341,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             "In search/XRef/goto mode:",
             "Esc - Exit mode",
             "Backspace - Delete character",
+            "f - Follow address reference",
         ];
 
         let help_paragraph = Paragraph::new(Text::from(help_text.join("\n")))
