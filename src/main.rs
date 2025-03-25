@@ -413,6 +413,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         hook(panic_info);
     }));
 
+    use tracing_subscriber::prelude::*;
+    tracing_subscriber::registry()
+        .with(tui_logger::TuiTracingSubscriberLayer)
+        .init();
+    tui_logger::init_logger(tui_logger::LevelFilter::Trace).unwrap();
+
     let args = Cli::parse();
 
     let adj_pdb = args.input.with_extension("pdb");

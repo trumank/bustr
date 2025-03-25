@@ -76,10 +76,6 @@ pub struct App<'data> {
     pub goto_mode: bool,
     pub goto_query: String,
 
-    log_entries: VecDeque<LogEntry>,
-    log_state: ListState,
-    log: Log,
-    log_rx: mpsc::Receiver<LogEntry>,
     pub search_state: SearchState,
 }
 
@@ -95,9 +91,6 @@ impl<'data> App<'data> {
     pub fn new() -> Self {
         let mut disassembly_state = ListState::default();
         disassembly_state.select(Some(0));
-
-        let (log_tx, log_rx) = mpsc::channel();
-        let log = Log(log_tx);
 
         let search_state = SearchState::new();
 
@@ -125,10 +118,6 @@ impl<'data> App<'data> {
             goto_mode: false,
             goto_query: String::new(),
 
-            log_entries: VecDeque::with_capacity(1000),
-            log_state: ListState::default(),
-            log,
-            log_rx,
             search_state,
         }
     }
@@ -166,9 +155,7 @@ impl<'data> App<'data> {
                 self.search_state.scroll_up(amount);
                 self.select_search_result();
             }
-            Pane::DebugLog => {
-                self.log_state.scroll_up_by(amount as u16);
-            }
+            Pane::DebugLog => {}
         }
     }
 
@@ -187,9 +174,7 @@ impl<'data> App<'data> {
                 self.search_state.scroll_down(amount);
                 self.select_search_result();
             }
-            Pane::DebugLog => {
-                self.log_state.scroll_down_by(amount as u16);
-            }
+            Pane::DebugLog => {}
         }
     }
 
@@ -249,11 +234,7 @@ impl<'data> App<'data> {
                 self.search_state.jump_to_top();
                 self.select_search_result();
             }
-            Pane::DebugLog => {
-                if !self.log_entries.is_empty() {
-                    self.log_state.select(Some(0));
-                }
-            }
+            Pane::DebugLog => {}
         }
     }
 
@@ -274,11 +255,7 @@ impl<'data> App<'data> {
                 self.search_state.jump_to_bottom();
                 self.select_search_result();
             }
-            Pane::DebugLog => {
-                if !self.log_entries.is_empty() {
-                    self.log_state.select(Some(self.log_entries.len() - 1));
-                }
-            }
+            Pane::DebugLog => {}
         }
     }
 
@@ -429,16 +406,6 @@ impl<'data> App<'data> {
                 self.active_pane = Pane::Disassembly;
                 self.goto_mode = false;
             }
-        }
-    }
-
-    fn recv_log(&mut self) {
-        while let Ok(entry) = self.log_rx.try_recv() {
-            self.log_entries.push_back(entry);
-            if self.log_entries.len() > 1000 {
-                self.log_entries.pop_front();
-            }
-            self.log_state.select(Some(self.log_entries.len() - 1));
         }
     }
 
@@ -912,37 +879,10 @@ fn ui(f: &mut Frame, app: &mut App) {
 
     // Add log panel at the bottom if enabled
     if app.show_log {
-        app.recv_log();
+        let log =
+            tui_logger::TuiLoggerWidget::default().block(Block::bordered().title("Debug Log"));
 
-        let log_items: Vec<ListItem> = app
-            .log_entries
-            .iter()
-            .map(|entry| {
-                let elapsed = entry.timestamp.elapsed();
-                let time_str = format!(
-                    "{:02}:{:02}:{:02}",
-                    elapsed.as_secs() / 3600,
-                    (elapsed.as_secs() % 3600) / 60,
-                    elapsed.as_secs() % 60
-                );
-                ListItem::new(format!("[{}] {}", time_str, entry.message))
-            })
-            .collect();
-
-        let log_list = List::new(log_items)
-            .block(
-                Block::default()
-                    .title("Debug Log")
-                    .borders(Borders::ALL)
-                    .border_style(if app.active_pane == Pane::DebugLog {
-                        Style::default().fg(Color::Yellow)
-                    } else {
-                        Style::default()
-                    }),
-            )
-            .highlight_style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED));
-
-        f.render_stateful_widget(log_list, chunks[1], &mut app.log_state);
+        f.render_widget(log, chunks[1]);
     }
 }
 
