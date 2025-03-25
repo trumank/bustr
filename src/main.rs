@@ -2,8 +2,8 @@ mod disassembly_ui;
 mod fuzzy;
 mod lazy_list;
 mod pdb_loader;
+mod search_ui;
 mod ui;
-mod xref_ui;
 
 use clap::Parser;
 use iced_x86::{

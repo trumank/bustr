@@ -3,7 +3,7 @@ use crate::{
     disassembly_ui::{DisassemblyState, DisassemblyWidget},
     fuzzy::highlight_matches,
     lazy_list::{LazyList, ListItemProducer},
-    xref_ui::{XRefState, XRefWidget},
+    search_ui::{SearchState, SearchType, SearchWidget},
 };
 use crossterm::{
     event::{
@@ -80,14 +80,14 @@ pub struct App<'data> {
     log_state: ListState,
     log: Log,
     log_rx: mpsc::Receiver<LogEntry>,
-    pub xref_state: XRefState,
+    pub search_state: SearchState,
 }
 
 #[derive(PartialEq)]
 pub enum Pane {
     Disassembly,
     Symbols,
-    XRefs,
+    Search,
     DebugLog,
 }
 
@@ -99,11 +99,13 @@ impl<'data> App<'data> {
         let (log_tx, log_rx) = mpsc::channel();
         let log = Log(log_tx);
 
+        let search_state = SearchState::new();
+
         Self {
             symbols: Vec::new(),
             show_help: false,
             should_quit: false,
-            show_log: true,
+            show_log: false,
 
             active_pane: Pane::Disassembly,
             search_mode: false,
@@ -127,7 +129,7 @@ impl<'data> App<'data> {
             log_state: ListState::default(),
             log,
             log_rx,
-            xref_state: XRefState::new(),
+            search_state,
         }
     }
 
@@ -160,9 +162,9 @@ impl<'data> App<'data> {
                 self.symbol_list_state.scroll_up_by(amount as u16);
                 self.select_symbol();
             }
-            Pane::XRefs => {
-                self.xref_state.scroll_up(amount);
-                self.select_xref();
+            Pane::Search => {
+                self.search_state.scroll_up(amount);
+                self.select_search_result();
             }
             Pane::DebugLog => {
                 self.log_state.scroll_up_by(amount as u16);
@@ -181,9 +183,9 @@ impl<'data> App<'data> {
                 self.symbol_list_state.scroll_down_by(amount as u16);
                 self.select_symbol();
             }
-            Pane::XRefs => {
-                self.xref_state.scroll_down(amount);
-                self.select_xref();
+            Pane::Search => {
+                self.search_state.scroll_down(amount);
+                self.select_search_result();
             }
             Pane::DebugLog => {
                 self.log_state.scroll_down_by(amount as u16);
@@ -198,8 +200,8 @@ impl<'data> App<'data> {
     pub fn toggle_pane(&mut self) {
         self.active_pane = match self.active_pane {
             Pane::Disassembly => Pane::Symbols,
-            Pane::Symbols => Pane::XRefs,
-            Pane::XRefs => {
+            Pane::Symbols => Pane::Search,
+            Pane::Search => {
                 if self.show_log {
                     Pane::DebugLog
                 } else {
@@ -243,9 +245,9 @@ impl<'data> App<'data> {
                 jump_to_top(&mut self.symbol_list_state);
                 self.select_symbol();
             }
-            Pane::XRefs => {
-                self.xref_state.jump_to_top();
-                self.select_xref();
+            Pane::Search => {
+                self.search_state.jump_to_top();
+                self.select_search_result();
             }
             Pane::DebugLog => {
                 if !self.log_entries.is_empty() {
@@ -268,9 +270,9 @@ impl<'data> App<'data> {
                 jump_to_bottom(&mut self.symbol_list_state, self.symbols.len());
                 self.select_symbol();
             }
-            Pane::XRefs => {
-                self.xref_state.jump_to_bottom();
-                self.select_xref();
+            Pane::Search => {
+                self.search_state.jump_to_bottom();
+                self.select_search_result();
             }
             Pane::DebugLog => {
                 if !self.log_entries.is_empty() {
@@ -350,7 +352,7 @@ impl<'data> App<'data> {
                     .and_then(|l| l.address())
                 {
                     self.find_xrefs(address);
-                    self.active_pane = Pane::XRefs;
+                    self.active_pane = Pane::Search;
                 }
             }
             Pane::Symbols => {
@@ -360,35 +362,41 @@ impl<'data> App<'data> {
                     .and_then(|s| self.symbols.get(s))
                 {
                     self.find_xrefs(symbol.address);
-                    self.active_pane = Pane::XRefs;
+                    self.active_pane = Pane::Search;
                 }
             }
-            Pane::XRefs => {
-                self.xref_state.toggle_search_mode();
+            Pane::Search => {
+                self.search_state.toggle_search_mode();
             }
             _ => {}
         }
     }
 
-    pub fn add_to_xref_query(&mut self, c: char) {
-        self.xref_state.add_to_query(c);
-    }
-
-    pub fn remove_from_xref_query(&mut self) {
-        self.xref_state.remove_from_query();
-    }
-
     pub fn find_xrefs(&mut self, address: u64) {
         if let Some(binary_data) = &self.binary_data {
-            self.xref_state.find_xrefs(binary_data, address);
+            self.search_state.set_search_type(SearchType::XRef);
+            self.search_state.find_xrefs(binary_data, address);
         }
     }
 
-    pub fn select_xref(&mut self) {
-        if self.active_pane == Pane::XRefs {
-            if let Some(xref) = self.xref_state.selected_xref() {
-                self.disassembly_state
-                    .set_current_address(xref.from_address);
+    pub fn find_strings(&mut self) {
+        if let Some(binary_data) = &self.binary_data {
+            self.search_state.set_search_type(SearchType::String);
+            self.search_state.find_strings(binary_data, 4); // Minimum length of 4
+        }
+    }
+
+    pub fn find_byte_pattern(&mut self, pattern: &str) {
+        if let Some(binary_data) = &self.binary_data {
+            self.search_state.set_search_type(SearchType::BytePattern);
+            self.search_state.find_byte_pattern(binary_data, pattern);
+        }
+    }
+
+    pub fn select_search_result(&mut self) {
+        if self.active_pane == Pane::Search {
+            if let Some(result) = self.search_state.selected_result() {
+                self.disassembly_state.set_current_address(result.address);
             }
         }
     }
@@ -527,19 +535,21 @@ pub fn run_app<'data, B: Backend>(
                             }
                             _ => {}
                         }
-                    } else if app.active_pane == Pane::XRefs && app.xref_state.search_mode && !ctrl
+                    } else if app.active_pane == Pane::Search
+                        && app.search_state.search_mode
+                        && !ctrl
                     {
                         match key.code {
                             KeyCode::Esc => app.find_xref(),
-                            KeyCode::Backspace => app.remove_from_xref_query(),
+                            KeyCode::Backspace => app.search_state.remove_from_query(),
                             KeyCode::Enter => {
                                 app.find_xrefs(
-                                    u64::from_str_radix(&app.xref_state.query, 16).unwrap(),
+                                    u64::from_str_radix(&app.search_state.query, 16).unwrap(),
                                 );
-                                app.xref_state.toggle_search_mode();
+                                app.search_state.toggle_search_mode();
                             }
                             KeyCode::Char(c) if c.is_ascii_hexdigit() || c == 'x' => {
-                                app.add_to_xref_query(c)
+                                app.search_state.add_to_query(c)
                             }
                             _ => {}
                         }
@@ -600,8 +610,8 @@ pub fn run_app<'data, B: Backend>(
                             KeyCode::Enter => {
                                 if app.active_pane == Pane::Symbols {
                                     app.select_symbol();
-                                } else if app.active_pane == Pane::XRefs {
-                                    app.select_xref();
+                                } else if app.active_pane == Pane::Search {
+                                    app.select_search_result();
                                 }
                             }
                             KeyCode::Char('f') => app.follow_address_reference(),
@@ -801,79 +811,9 @@ fn ui(f: &mut Frame, app: &mut App) {
         }
     }
 
-    // XRefs pane (bottom right)
-    let xrefs_area = chunks_vert[1];
-
-    // Calculate the inner area of the XRefs block
-    let xrefs_inner_area = Block::default()
-        .title(format!("XRefs ({} found)", app.xref_state.xrefs.len()))
-        .borders(Borders::ALL)
-        .border_style(if app.active_pane == Pane::XRefs {
-            Style::default().fg(Color::Yellow)
-        } else {
-            Style::default()
-        })
-        .inner(xrefs_area);
-
-    // Render the block first
-    f.render_widget(
-        Block::default()
-            .title(format!("XRefs ({} found)", app.xref_state.xrefs.len()))
-            .borders(Borders::ALL)
-            .border_style(if app.active_pane == Pane::XRefs {
-                Style::default().fg(Color::Yellow)
-            } else {
-                Style::default()
-            }),
-        xrefs_area,
-    );
-
-    // Split the inner area for query bar and XRefs list
-    let xrefs_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1), // Query bar takes just one line
-            Constraint::Min(1),    // XRefs list takes the rest
-        ])
-        .split(xrefs_inner_area);
-
-    // Always render the query bar, but style it differently when not in XRef mode
-    let query_text = if app.xref_state.search_mode {
-        format!("Address: {}", app.xref_state.query)
-    } else {
-        "Press 'x' to enter address".to_string()
-    };
-
-    let query_style = if app.xref_state.search_mode {
-        Style::default().fg(Color::Yellow)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-
-    let query_bar = Paragraph::new(query_text).style(query_style);
-
-    f.render_widget(query_bar, xrefs_chunks[0]);
-
-    // Create the XRef widget
-    let xref_widget = XRefWidget::new()
-        .block(
-            Block::default()
-                .title(format!(
-                    "XRefs to 0x{:X} ({} found)",
-                    app.xref_state.current_address().unwrap_or(0),
-                    app.xref_state.xrefs.len()
-                ))
-                .borders(Borders::ALL)
-                .border_style(if app.active_pane == Pane::XRefs {
-                    Style::default().fg(Color::Yellow)
-                } else {
-                    Style::default()
-                }),
-        )
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED));
-
-    // Render the XRef widget
-    f.render_stateful_widget(xref_widget, xrefs_chunks[1], &mut app.xref_state);
+    // Search widget
+    let search_widget = SearchWidget::new(app.active_pane == Pane::Search);
+    f.render_stateful_widget(search_widget, chunks_vert[1], &mut app.search_state);
 
     // If in goto mode, show the goto dialog
     if app.goto_mode {
