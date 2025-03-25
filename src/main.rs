@@ -431,8 +431,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Restore terminal
     restore_terminal(&mut terminal)?;
 
+    let should_quit = app.should_quit;
+
+    // dropping can take a long time so just don't
+    std::mem::forget(app);
+
     // If the app should quit, exit normally
-    if app.should_quit {
+    if should_quit {
         Ok(())
     } else {
         // This shouldn't happen, but just in case
