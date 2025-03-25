@@ -1,4 +1,5 @@
 mod fuzzy;
+mod lazy_list;
 mod pdb_loader;
 mod ui;
 

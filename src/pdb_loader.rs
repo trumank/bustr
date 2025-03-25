@@ -1,5 +1,5 @@
 use anyhow::Result;
-use pdb::{PDB, Source};
+use pdb::PDB;
 use std::{ffi::c_void, fmt, fs::File};
 
 #[cfg(not(target_os = "linux"))]
