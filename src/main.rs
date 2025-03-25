@@ -1,3 +1,4 @@
+mod disassembly_ui;
 mod fuzzy;
 mod lazy_list;
 mod pdb_loader;
