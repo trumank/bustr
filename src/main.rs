@@ -3,6 +3,7 @@ mod fuzzy;
 mod lazy_list;
 mod pdb_loader;
 mod ui;
+mod xref_ui;
 
 use clap::Parser;
 use iced_x86::{

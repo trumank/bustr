@@ -3,6 +3,7 @@ use crate::{
     disassembly_ui::{DisassemblyState, DisassemblyWidget},
     fuzzy::highlight_matches,
     lazy_list::{LazyList, ListItemProducer},
+    xref_ui::{XRefState, XRefWidget},
 };
 use crossterm::{
     event::{
@@ -12,7 +13,6 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use nucleo::pattern::{CaseMatching, Normalization};
-use patternsleuth_image::PatternConfig;
 use ratatui::{
     Frame, Terminal,
     backend::{Backend, CrosstermBackend},
@@ -72,10 +72,7 @@ pub struct App<'data> {
     pub binary_data: Option<BinaryData<'data>>,
     pub search_query: String,
     nucleo: nucleo::Nucleo<SymbolInfo>,
-    pub xref_mode: bool,
-    pub xref_query: String,
-    pub xrefs: Vec<XRefInfo>,
-    pub xref_list_state: ListState,
+
     pub goto_mode: bool,
     pub goto_query: String,
 
@@ -83,6 +80,7 @@ pub struct App<'data> {
     log_state: ListState,
     log: Log,
     log_rx: mpsc::Receiver<LogEntry>,
+    pub xref_state: XRefState,
 }
 
 #[derive(PartialEq)]
@@ -91,21 +89,6 @@ pub enum Pane {
     Symbols,
     XRefs,
     DebugLog,
-}
-
-#[derive(Clone)]
-pub struct XRefInfo {
-    pub from_address: u64,
-    pub to_address: u64,
-    pub kind: XRefKind,
-    pub instruction: String,
-}
-
-#[derive(Clone, PartialEq)]
-pub enum XRefKind {
-    Call,
-    Jump,
-    DataRef,
 }
 
 impl<'data> App<'data> {
@@ -137,10 +120,6 @@ impl<'data> App<'data> {
                 None,
                 1,
             ),
-            xref_mode: false,
-            xref_query: String::new(),
-            xrefs: Vec::new(),
-            xref_list_state: ListState::default(),
             goto_mode: false,
             goto_query: String::new(),
 
@@ -148,6 +127,7 @@ impl<'data> App<'data> {
             log_state: ListState::default(),
             log,
             log_rx,
+            xref_state: XRefState::new(),
         }
     }
 
@@ -163,11 +143,6 @@ impl<'data> App<'data> {
                 columns[0] = sym.display_name().into();
             });
         }
-    }
-
-    pub fn set_xrefs(&mut self, xrefs: Vec<XRefInfo>) {
-        self.xrefs = xrefs;
-        self.xref_list_state.select(Some(0));
     }
 
     pub fn set_binary_data(&mut self, binary_data: BinaryData<'data>) {
@@ -186,7 +161,7 @@ impl<'data> App<'data> {
                 self.select_symbol();
             }
             Pane::XRefs => {
-                self.xref_list_state.scroll_up_by(amount as u16);
+                self.xref_state.scroll_up(amount);
                 self.select_xref();
             }
             Pane::DebugLog => {
@@ -207,7 +182,7 @@ impl<'data> App<'data> {
                 self.select_symbol();
             }
             Pane::XRefs => {
-                self.xref_list_state.scroll_down_by(amount as u16);
+                self.xref_state.scroll_down(amount);
                 self.select_xref();
             }
             Pane::DebugLog => {
@@ -269,7 +244,7 @@ impl<'data> App<'data> {
                 self.select_symbol();
             }
             Pane::XRefs => {
-                jump_to_top(&mut self.xref_list_state);
+                self.xref_state.jump_to_top();
                 self.select_xref();
             }
             Pane::DebugLog => {
@@ -290,11 +265,11 @@ impl<'data> App<'data> {
             }
             Pane::Symbols => {
                 // TODO handle search
-                jump_to_bottom(&mut self.xref_list_state, self.symbols.len());
+                jump_to_bottom(&mut self.symbol_list_state, self.symbols.len());
                 self.select_symbol();
             }
             Pane::XRefs => {
-                jump_to_bottom(&mut self.xref_list_state, self.xrefs.len());
+                self.xref_state.jump_to_bottom();
                 self.select_xref();
             }
             Pane::DebugLog => {
@@ -365,7 +340,7 @@ impl<'data> App<'data> {
         jump_to_top(&mut self.symbol_list_state);
     }
 
-    pub fn toggle_xref_mode(&mut self) {
+    pub fn find_xref(&mut self) {
         match self.active_pane {
             Pane::Disassembly => {
                 if let Some(address) = self
@@ -389,72 +364,31 @@ impl<'data> App<'data> {
                 }
             }
             Pane::XRefs => {
-                self.xref_mode = !self.xref_mode;
-                if self.xref_mode {
-                    self.xref_query.clear();
-                }
+                self.xref_state.toggle_search_mode();
             }
             _ => {}
         }
     }
 
     pub fn add_to_xref_query(&mut self, c: char) {
-        if self.xref_mode {
-            self.xref_query.push(c);
-        }
+        self.xref_state.add_to_query(c);
     }
 
-    pub fn backspace_xref_query(&mut self) {
-        if self.xref_mode && !self.xref_query.is_empty() {
-            self.xref_query.pop();
-        }
-    }
-
-    pub fn submit_xref_query(&mut self) {
-        if self.xref_mode && !self.xref_query.is_empty() {
-            // Parse the address from the query
-            if let Ok(addr) = u64::from_str_radix(self.xref_query.trim_start_matches("0x"), 16) {
-                self.find_xrefs(addr);
-                self.xref_mode = false;
-            }
-        }
+    pub fn remove_from_xref_query(&mut self) {
+        self.xref_state.remove_from_query();
     }
 
     pub fn find_xrefs(&mut self, address: u64) {
-        let Some(binary_data) = &self.binary_data else {
-            return;
-        };
-
-        let config = [PatternConfig::xref(
-            (),
-            "".into(),
-            None,
-            patternsleuth_image::scanner::Xref(address as usize),
-        )];
-
-        let res = binary_data.file.scan(&config).unwrap();
-
-        self.set_xrefs(
-            res.results
-                .into_iter()
-                .map(|(_, r)| XRefInfo {
-                    from_address: r.address as u64,
-                    to_address: address,
-                    kind: XRefKind::Call,
-                    instruction: format!("call 0x{:X}", address),
-                })
-                .collect(),
-        )
+        if let Some(binary_data) = &self.binary_data {
+            self.xref_state.find_xrefs(binary_data, address);
+        }
     }
 
     pub fn select_xref(&mut self) {
         if self.active_pane == Pane::XRefs {
-            if let Some(idx) = self.xref_list_state.selected() {
-                if idx < self.xrefs.len() {
-                    let xref = &self.xrefs[idx];
-                    self.disassembly_state
-                        .set_current_address(xref.from_address);
-                }
+            if let Some(xref) = self.xref_state.selected_xref() {
+                self.disassembly_state
+                    .set_current_address(xref.from_address);
             }
         }
     }
@@ -511,12 +445,12 @@ impl<'data> App<'data> {
     }
 }
 
-fn jump_to_top(state: &mut ListState) {
+pub fn jump_to_top(state: &mut ListState) {
     *state.offset_mut() = 0;
     state.select(Some(0));
 }
 
-fn jump_to_bottom(state: &mut ListState, item_len: usize) {
+pub fn jump_to_bottom(state: &mut ListState, item_len: usize) {
     let last = item_len.saturating_sub(1);
     //*self.state.offset_mut() = last;
     state.select(Some(last));
@@ -593,11 +527,17 @@ pub fn run_app<'data, B: Backend>(
                             }
                             _ => {}
                         }
-                    } else if app.active_pane == Pane::XRefs && app.xref_mode && !ctrl {
+                    } else if app.active_pane == Pane::XRefs && app.xref_state.search_mode && !ctrl
+                    {
                         match key.code {
-                            KeyCode::Esc => app.toggle_xref_mode(),
-                            KeyCode::Backspace => app.backspace_xref_query(),
-                            KeyCode::Enter => app.submit_xref_query(),
+                            KeyCode::Esc => app.find_xref(),
+                            KeyCode::Backspace => app.remove_from_xref_query(),
+                            KeyCode::Enter => {
+                                app.find_xrefs(
+                                    u64::from_str_radix(&app.xref_state.query, 16).unwrap(),
+                                );
+                                app.xref_state.toggle_search_mode();
+                            }
                             KeyCode::Char(c) if c.is_ascii_hexdigit() || c == 'x' => {
                                 app.add_to_xref_query(c)
                             }
@@ -655,7 +595,7 @@ pub fn run_app<'data, B: Backend>(
 
                             KeyCode::Char('/') => app.toggle_search(),
                             KeyCode::Char('x') => {
-                                app.toggle_xref_mode();
+                                app.find_xref();
                             }
                             KeyCode::Enter => {
                                 if app.active_pane == Pane::Symbols {
@@ -866,7 +806,7 @@ fn ui(f: &mut Frame, app: &mut App) {
 
     // Calculate the inner area of the XRefs block
     let xrefs_inner_area = Block::default()
-        .title(format!("XRefs ({} found)", app.xrefs.len()))
+        .title(format!("XRefs ({} found)", app.xref_state.xrefs.len()))
         .borders(Borders::ALL)
         .border_style(if app.active_pane == Pane::XRefs {
             Style::default().fg(Color::Yellow)
@@ -878,7 +818,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     // Render the block first
     f.render_widget(
         Block::default()
-            .title(format!("XRefs ({} found)", app.xrefs.len()))
+            .title(format!("XRefs ({} found)", app.xref_state.xrefs.len()))
             .borders(Borders::ALL)
             .border_style(if app.active_pane == Pane::XRefs {
                 Style::default().fg(Color::Yellow)
@@ -898,13 +838,13 @@ fn ui(f: &mut Frame, app: &mut App) {
         .split(xrefs_inner_area);
 
     // Always render the query bar, but style it differently when not in XRef mode
-    let query_text = if app.xref_mode {
-        format!("Address: {}", app.xref_query)
+    let query_text = if app.xref_state.search_mode {
+        format!("Address: {}", app.xref_state.query)
     } else {
         "Press 'x' to enter address".to_string()
     };
 
-    let query_style = if app.xref_mode {
+    let query_style = if app.xref_state.search_mode {
         Style::default().fg(Color::Yellow)
     } else {
         Style::default().fg(Color::DarkGray)
@@ -914,38 +854,26 @@ fn ui(f: &mut Frame, app: &mut App) {
 
     f.render_widget(query_bar, xrefs_chunks[0]);
 
-    struct XrefListProd<'a>(&'a [XRefInfo]);
-    impl<'a> ListItemProducer<'a> for XrefListProd<'a> {
-        fn total(&self) -> usize {
-            self.0.len()
-        }
-        fn items(
-            &self,
-            range: std::ops::Range<usize>,
-        ) -> impl ExactSizeIterator<Item = ListItem<'a>> {
-            self.0[range].iter().map(|xref| {
-                let kind_str = match xref.kind {
-                    XRefKind::Call => "call",
-                    XRefKind::Jump => "jmp",
-                    XRefKind::DataRef => "ref",
-                };
-                ListItem::new(Line::from(vec![Span::styled(
-                    format!(
-                        "{:016X} {} {:016X}",
-                        xref.from_address, kind_str, xref.to_address
-                    ),
-                    Style::default().fg(Color::White),
-                )]))
-            })
-        }
-    }
+    // Create the XRef widget
+    let xref_widget = XRefWidget::new()
+        .block(
+            Block::default()
+                .title(format!(
+                    "XRefs to 0x{:X} ({} found)",
+                    app.xref_state.current_address().unwrap_or(0),
+                    app.xref_state.xrefs.len()
+                ))
+                .borders(Borders::ALL)
+                .border_style(if app.active_pane == Pane::XRefs {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default()
+                }),
+        )
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED));
 
-    // Render the xrefs list
-    f.render_stateful_widget(
-        LazyList::new(XrefListProd(&app.xrefs)),
-        xrefs_chunks[1],
-        &mut app.xref_list_state,
-    );
+    // Render the XRef widget
+    f.render_stateful_widget(xref_widget, xrefs_chunks[1], &mut app.xref_state);
 
     // If in goto mode, show the goto dialog
     if app.goto_mode {
