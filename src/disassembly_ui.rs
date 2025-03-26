@@ -454,7 +454,6 @@ fn format_disassembly_line<'a>(line: &'a DisassemblyLine, jumps: &'a Jumps) -> L
             bytes,
             instruction,
             comments,
-            referenced_address,
             ..
         } => {
             let mut spans = vec![Span::styled(
@@ -478,7 +477,8 @@ fn format_disassembly_line<'a>(line: &'a DisassemblyLine, jumps: &'a Jumps) -> L
 
                 let mut columns = vec![None; max_width];
                 for jump in jumps.jumps_spanning(*address) {
-                    columns[jump.column] = Some(jump);
+                    // insert them into sparse column array (in reverse direction)
+                    columns[max_width - 1 - jump.column] = Some(jump);
                 }
 
                 let mut grid = vec![Span::raw(" "); max_width * 2];
