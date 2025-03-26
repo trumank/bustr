@@ -60,7 +60,7 @@ mod tests {
         let result = highlight_matches("function_name", "fn");
         assert_eq!(
             result,
-            vec![(0, 1, true), (1, 8, false), (8, 9, true), (9, 13, false)]
+            vec![(0, 1, true), (1, 2, false), (2, 3, true), (3, 13, false)]
         );
     }
 }
