@@ -322,7 +322,7 @@ impl StatefulWidget for DisassemblyWidget<'_> {
                 instruction,
                 referenced_address: Some(referenced),
                 ..
-            } if instruction.starts_with("j") => Some(JumpPath::new(*address, *referenced)),
+            } if instruction.starts_with("j") => Some(JumpEdge::new(*address, *referenced)),
             _ => None,
         });
 
@@ -346,26 +346,36 @@ impl StatefulWidget for DisassemblyWidget<'_> {
 }
 
 struct Jumps {
-    jumps: Vec<JumpPath>,
+    jumps: Vec<JumpEdge>,
     max_width: usize,
 }
 
-struct JumpPath {
+struct JumpEdge {
     start: u64,
     end: u64,
-    //direction
+    direction: Direction,
     column: usize,
 }
-impl JumpPath {
+#[derive(PartialEq)]
+enum Direction {
+    Up,
+    Down,
+}
+impl JumpEdge {
     fn new(from: u64, to: u64) -> Self {
-        let (start, end) = if from < to { (from, to) } else { (to, from) };
+        let (start, end, direction) = if from < to {
+            (from, to, Direction::Down)
+        } else {
+            (to, from, Direction::Up)
+        };
         Self {
             start,
             end,
+            direction,
             column: 0,
         }
     }
-    fn overlaps_with(&self, other: &JumpPath) -> bool {
+    fn overlaps_with(&self, other: &JumpEdge) -> bool {
         self.start.max(other.start) <= self.end.min(other.end)
     }
     fn overlaps(&self, address: u64) -> bool {
@@ -374,15 +384,15 @@ impl JumpPath {
 }
 
 impl Jumps {
-    fn new(jumps: impl IntoIterator<Item = JumpPath>) -> Self {
+    fn new(jumps: impl IntoIterator<Item = JumpEdge>) -> Self {
         let mut jumps = jumps.into_iter().collect::<Vec<_>>();
         let max_width = Self::layout(&mut jumps);
         Self { jumps, max_width }
     }
-    fn jumps_spanning(&self, address: u64) -> impl Iterator<Item = &JumpPath> {
+    fn jumps_spanning(&self, address: u64) -> impl Iterator<Item = &JumpEdge> {
         self.jumps.iter().filter(move |j| j.overlaps(address))
     }
-    fn layout(jumps: &mut [JumpPath]) -> usize {
+    fn layout(jumps: &mut [JumpEdge]) -> usize {
         // Sort traces by start position
         jumps.sort_by_key(|t| t.start);
 
