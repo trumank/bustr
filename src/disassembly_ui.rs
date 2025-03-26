@@ -71,6 +71,7 @@ impl DisassemblyState {
     }
 
     pub fn set_current_address(&mut self, address: u64) {
+        tracing::info!("set address {address:x}");
         self.current_address = address;
         self.needs_refresh = true;
 

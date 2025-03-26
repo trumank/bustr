@@ -297,52 +297,28 @@ impl<'data> App<'data> {
     }
 
     pub fn find_xref(&mut self) {
-        match self.active_pane {
-            Pane::Disassembly => {
-                if let Some(address) = self
-                    .disassembly_state
-                    .selected()
-                    .and_then(|s| self.disassembly_state.disassembly.get(s))
-                    .and_then(|l| l.address())
-                {
-                    if let Some(binary_data) = &self.binary_data {
-                        self.search_state
-                            .search(binary_data, Search::XRef { address });
-                        self.active_pane = Pane::Search;
-                    }
-                }
-            }
-            Pane::Symbols => {
-                if let Some(symbol) = self
-                    .symbol_list_state
-                    .selected()
-                    .and_then(|s| self.symbols.get(s))
-                {
-                    if let Some(binary_data) = &self.binary_data {
-                        self.search_state.search(
-                            binary_data,
-                            Search::XRef {
-                                address: symbol.address,
-                            },
-                        );
-                        self.active_pane = Pane::Search;
-                    }
-                }
-            }
-            Pane::Search => {
-                if let Some(search_item) = self.search_state.selected_result() {
-                    if let Some(binary_data) = &self.binary_data {
-                        self.search_state.search(
-                            binary_data,
-                            Search::XRef {
-                                address: search_item.address,
-                            },
-                        );
-                        self.active_pane = Pane::Search;
-                    }
-                }
-            }
-            _ => {}
+        let address = match self.active_pane {
+            Pane::Disassembly => self
+                .disassembly_state
+                .selected()
+                .and_then(|s| self.disassembly_state.disassembly.get(s))
+                .and_then(|l| l.address()),
+            Pane::Symbols => self
+                .symbol_list_state
+                .selected()
+                .and_then(|s| self.symbols.get(s))
+                .map(|s| s.address),
+            Pane::Search => self.search_state.selected_result().map(|s| s.address),
+            _ => None,
+        };
+
+        if let (Some(address), Some(binary_data)) = (address, &self.binary_data) {
+            self.search_state
+                .search(binary_data, Search::XRef { address });
+            self.search_state
+                .selected_result()
+                .inspect(|s| self.disassembly_state.set_current_address(s.address));
+            self.active_pane = Pane::Search;
         }
     }
 
@@ -518,6 +494,9 @@ pub fn run_app<'data, B: Backend>(
                             KeyCode::Enter => {
                                 if let Some(binary_data) = &app.binary_data {
                                     app.search_state.submit_query(binary_data);
+                                    app.search_state.selected_result().inspect(|s| {
+                                        app.disassembly_state.set_current_address(s.address)
+                                    });
                                 }
                             }
                             KeyCode::Char(c) => app.search_state.add_to_query(c),
