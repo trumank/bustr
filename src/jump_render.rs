@@ -1,7 +1,9 @@
+use std::collections::HashMap;
+
 use ratatui::style::{Color, Style};
 use ratatui::text::Span;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct JumpEdge {
     pub start: u64,
     pub end: u64,
@@ -9,7 +11,7 @@ pub struct JumpEdge {
     pub column: usize,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Direction {
     Up,
     Down,
@@ -37,6 +39,19 @@ impl JumpEdge {
     pub fn overlaps(&self, address: u64) -> bool {
         (self.start..=self.end).contains(&address)
     }
+
+    pub fn src(&self) -> u64 {
+        match self.direction {
+            Direction::Up => self.end,
+            Direction::Down => self.start,
+        }
+    }
+    pub fn dst(&self) -> u64 {
+        match self.direction {
+            Direction::Up => self.start,
+            Direction::Down => self.end,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -61,13 +76,41 @@ impl Jumps {
     }
 
     fn layout(jumps: &mut [JumpEdge]) -> usize {
+        #[derive(Debug)]
+        struct JumpGroup {
+            start: u64,
+            end: u64,
+            jumps_idx: Vec<usize>,
+        }
+        impl JumpGroup {
+            pub fn overlaps_with(&self, other: &JumpGroup) -> bool {
+                self.start.max(other.start) <= self.end.min(other.end)
+            }
+        }
+
+        // group edges by dst
+        let mut groups = {
+            let mut bins: HashMap<u64, JumpGroup> = HashMap::new();
+            for (idx, jump) in jumps.iter().enumerate() {
+                let group = bins.entry(jump.dst()).or_insert(JumpGroup {
+                    start: u64::MAX,
+                    end: 0,
+                    jumps_idx: vec![],
+                });
+                group.jumps_idx.push(idx);
+                group.start = group.start.min(jump.start);
+                group.end = group.start.max(jump.end);
+            }
+            bins.into_values().collect::<Vec<_>>()
+        };
+
         // Sort jumps by start position
-        jumps.sort_by_key(|t| t.start);
+        groups.sort_by_key(|t| t.start);
 
         // Track active jumps at each position
         let mut active_columns: Vec<Option<usize>> = Vec::new();
 
-        for jump_idx in 0..jumps.len() {
+        for group_idx in 0..groups.len() {
             // Find the first available column
             let mut column = 0;
             loop {
@@ -82,26 +125,28 @@ impl Jumps {
                     break;
                 };
 
-                // Check if the jump in this column overlaps
-                let other_jump = &jumps[other_idx];
+                // Check if the group in this column overlaps
+                let other_group = &groups[other_idx];
 
-                if !jumps[jump_idx].overlaps_with(other_jump) {
+                if !groups[group_idx].overlaps_with(other_group) {
                     break;
                 }
 
                 column += 1;
             }
 
-            let jump = &mut jumps[jump_idx];
+            let group = &groups[group_idx];
 
             // Assign the column
-            jump.column = column;
+            for jump_idx in &group.jumps_idx {
+                jumps[*jump_idx].column = column;
+            }
 
-            // Mark this column as used by this jump
+            // Mark this column as used by this group
             while column >= active_columns.len() {
                 active_columns.push(None);
             }
-            active_columns[column] = Some(jump_idx);
+            active_columns[column] = Some(group_idx);
         }
 
         active_columns.len()
@@ -111,38 +156,53 @@ impl Jumps {
 pub fn render_jumps(address: u64, jumps: &Jumps) -> Vec<Span> {
     let max_width = jumps.max_width();
 
-    let mut columns = vec![None; max_width];
+    let mut columns = vec![Vec::new(); max_width];
     for jump in jumps.jumps_spanning(address) {
         // insert them into sparse column array (in reverse direction)
-        columns[max_width - 1 - jump.column] = Some(jump);
+        columns[max_width - 1 - jump.column].push(jump);
     }
 
     let mut grid = vec![Span::raw(" "); max_width * 2];
 
     let mut termination = None;
     for (i, col) in columns.into_iter().enumerate() {
-        if let Some(jump) = col {
+        let mut up = false;
+        let mut down = false;
+        let mut term = false;
+        for jump in &col {
             let start = address == jump.start;
             let end = address == jump.end;
-            let c = if start && end {
-                "╶"
-            } else if start {
-                "┌"
-            } else if end {
-                "└"
-            } else {
-                "│"
-            };
+            if address > jump.start {
+                up |= true;
+            }
+            if address < jump.end {
+                down |= true;
+            }
             if start || end {
+                term |= true;
                 termination = Some(());
             }
+        }
+        if col.is_empty() {
+            if let Some(termination) = termination {
+                grid[i * 2 + 0] = Span::styled("─", Style::default().fg(Color::Green));
+                grid[i * 2 + 1] = Span::styled("─", Style::default().fg(Color::Green));
+            }
+        } else {
+            let c = match (up, down, term) {
+                (true, true, true) => "├",
+                (true, true, false) => "│",
+                (true, false, true) => "└",
+                (true, false, false) => "╵",
+                (false, true, true) => "┌",
+                (false, true, false) => "╷",
+                (false, false, true) => "╶",
+                (false, false, false) => unreachable!(),
+            };
             grid[i * 2] = Span::styled(c, Style::default().fg(Color::Green));
             if let Some(termination) = termination {
                 grid[i * 2 + 1] = Span::styled("─", Style::default().fg(Color::Green));
             }
-        } else if let Some(termination) = termination {
-            grid[i * 2 + 0] = Span::styled("─", Style::default().fg(Color::Green));
-            grid[i * 2 + 1] = Span::styled("─", Style::default().fg(Color::Green));
         }
     }
 
@@ -161,8 +221,12 @@ mod tests {
         let jumps = &jumps.jumps;
         for a in 0..jumps.len() {
             for b in 0..jumps.len() {
-                if a != b && jumps[a].overlaps_with(&jumps[b]) {
-                    assert_ne!(jumps[a].column, jumps[b].column, "overlapping edges");
+                if a != b {
+                    let a = &jumps[a];
+                    let b = &jumps[b];
+                    if a.overlaps_with(&b) && a.dst() != b.dst() {
+                        assert_ne!(a.column, b.column, "overlapping edges");
+                    }
                 }
             }
         }
@@ -242,5 +306,18 @@ mod tests {
 
         let rendered = render_to_string(&jumps);
         println!("Self jumps:\n{}", rendered);
+    }
+
+    #[test]
+    fn test_converging() {
+        let jumps = Jumps::new(vec![
+            JumpEdge::new(2, 7),
+            JumpEdge::new(3, 6),
+            JumpEdge::new(1, 9),
+            JumpEdge::new(0, 9),
+        ]);
+
+        let rendered = render_to_string(&jumps);
+        println!("Converting\n{}", rendered);
     }
 }
