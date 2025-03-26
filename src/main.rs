@@ -1,5 +1,6 @@
 mod disassembly_ui;
 mod fuzzy;
+mod jump_render;
 mod lazy_list;
 mod pdb_loader;
 mod search_ui;

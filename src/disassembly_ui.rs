@@ -1,3 +1,4 @@
+use crate::jump_render::{JumpEdge, Jumps};
 use crate::{BinaryData, DisassemblyComment, DisassemblyLine, SymbolKind, ui::NavigationEntry};
 use ratatui::{
     buffer::Buffer,
@@ -345,101 +346,6 @@ impl StatefulWidget for DisassemblyWidget<'_> {
     }
 }
 
-struct Jumps {
-    jumps: Vec<JumpEdge>,
-    max_width: usize,
-}
-
-struct JumpEdge {
-    start: u64,
-    end: u64,
-    direction: Direction,
-    column: usize,
-}
-#[derive(PartialEq)]
-enum Direction {
-    Up,
-    Down,
-}
-impl JumpEdge {
-    fn new(from: u64, to: u64) -> Self {
-        let (start, end, direction) = if from < to {
-            (from, to, Direction::Down)
-        } else {
-            (to, from, Direction::Up)
-        };
-        Self {
-            start,
-            end,
-            direction,
-            column: 0,
-        }
-    }
-    fn overlaps_with(&self, other: &JumpEdge) -> bool {
-        self.start.max(other.start) <= self.end.min(other.end)
-    }
-    fn overlaps(&self, address: u64) -> bool {
-        (self.start..=self.end).contains(&address)
-    }
-}
-
-impl Jumps {
-    fn new(jumps: impl IntoIterator<Item = JumpEdge>) -> Self {
-        let mut jumps = jumps.into_iter().collect::<Vec<_>>();
-        let max_width = Self::layout(&mut jumps);
-        Self { jumps, max_width }
-    }
-    fn jumps_spanning(&self, address: u64) -> impl Iterator<Item = &JumpEdge> {
-        self.jumps.iter().filter(move |j| j.overlaps(address))
-    }
-    fn layout(jumps: &mut [JumpEdge]) -> usize {
-        // Sort traces by start position
-        jumps.sort_by_key(|t| t.start);
-
-        // Track active jumps at each position
-        let mut active_columns: Vec<Option<usize>> = Vec::new();
-
-        for jump_idx in 0..jumps.len() {
-            // Find the first available column
-            let mut column = 0;
-            loop {
-                // Extend active_columns if needed
-                if column >= active_columns.len() {
-                    active_columns.push(None);
-                    break;
-                }
-
-                // Check if this column is available
-                let Some(other_idx) = active_columns[column] else {
-                    break;
-                };
-
-                // Check if the jump in this column overlaps
-                let other_jump = &jumps[other_idx];
-
-                if !jumps[jump_idx].overlaps_with(other_jump) {
-                    break;
-                }
-
-                column += 1;
-            }
-
-            let jump = &mut jumps[jump_idx];
-
-            // Assign the column
-            jump.column = column;
-
-            // Mark this column as used by this jump
-            while column >= active_columns.len() {
-                active_columns.push(None);
-            }
-            active_columns[column] = Some(jump_idx);
-        }
-
-        active_columns.len()
-    }
-}
-
 /// Formats a disassembly line into a styled ListItem for display
 fn format_disassembly_line<'a>(line: &'a DisassemblyLine, jumps: &'a Jumps) -> ListItem<'a> {
     match line {
@@ -482,46 +388,8 @@ fn format_disassembly_line<'a>(line: &'a DisassemblyLine, jumps: &'a Jumps) -> L
                 spans.push(Span::raw("   "));
             }
 
-            {
-                let max_width = jumps.max_width;
-
-                let mut columns = vec![None; max_width];
-                for jump in jumps.jumps_spanning(*address) {
-                    // insert them into sparse column array (in reverse direction)
-                    columns[max_width - 1 - jump.column] = Some(jump);
-                }
-
-                let mut grid = vec![Span::raw(" "); max_width * 2];
-
-                let mut termination = None;
-                for (i, col) in columns.into_iter().enumerate() {
-                    if let Some(jump) = col {
-                        let start = *address == jump.start;
-                        let end = *address == jump.end;
-                        let c = if start && end {
-                            "╶"
-                        } else if start {
-                            "┌"
-                        } else if end {
-                            "└"
-                        } else {
-                            "│"
-                        };
-                        if start || end {
-                            termination = Some(());
-                        }
-                        grid[i * 2] = Span::raw(c);
-                        if let Some(termination) = termination {
-                            grid[i * 2 + 1] = Span::raw("─");
-                        }
-                    } else if let Some(termination) = termination {
-                        grid[i * 2 + 0] = Span::raw("─");
-                        grid[i * 2 + 1] = Span::raw("─");
-                    }
-                }
-
-                spans.extend(grid);
-            }
+            // Add jump rendering
+            spans.extend(crate::jump_render::render_jumps(*address, jumps));
 
             // Add instruction
             let instr_parts: Vec<&str> = instruction.split_whitespace().collect();
