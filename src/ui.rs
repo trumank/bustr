@@ -3,7 +3,7 @@ use crate::{
     disassembly_ui::{DisassemblyState, DisassemblyWidget},
     fuzzy::highlight_matches,
     lazy_list::{LazyList, ListItemProducer},
-    search_ui::{SearchState, SearchType, SearchWidget},
+    search_ui::{Search, SearchState, SearchWidget},
 };
 use crossterm::{
     event::{
@@ -19,14 +19,12 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, ListItem, ListState, Paragraph},
 };
 use std::{
-    collections::VecDeque,
     error::Error,
     io,
     path::PathBuf,
-    sync::mpsc,
     time::{Duration, Instant},
 };
 
@@ -34,26 +32,6 @@ use std::{
 pub struct NavigationEntry {
     pub address: u64,
     pub scroll_offset: usize,
-}
-
-#[derive(Clone)]
-struct LogEntry {
-    timestamp: Instant,
-    message: String,
-}
-
-#[derive(Clone)]
-pub struct Log(mpsc::Sender<LogEntry>);
-
-impl Log {
-    pub fn log(&mut self, message: impl Into<String>) {
-        self.0
-            .send(LogEntry {
-                timestamp: Instant::now(),
-                message: message.into(),
-            })
-            .unwrap();
-    }
 }
 
 pub struct App<'data> {
@@ -98,7 +76,7 @@ impl<'data> App<'data> {
             symbols: Vec::new(),
             show_help: false,
             should_quit: false,
-            show_log: false,
+            show_log: true,
 
             active_pane: Pane::Disassembly,
             search_mode: false,
@@ -328,8 +306,11 @@ impl<'data> App<'data> {
                     .and_then(|s| self.disassembly_state.disassembly.get(s))
                     .and_then(|l| l.address())
                 {
-                    self.find_xrefs(address);
-                    self.active_pane = Pane::Search;
+                    if let Some(binary_data) = &self.binary_data {
+                        self.search_state
+                            .search(binary_data, Search::XRef { address });
+                        self.active_pane = Pane::Search;
+                    }
                 }
             }
             Pane::Symbols => {
@@ -338,8 +319,15 @@ impl<'data> App<'data> {
                     .selected()
                     .and_then(|s| self.symbols.get(s))
                 {
-                    self.find_xrefs(symbol.address);
-                    self.active_pane = Pane::Search;
+                    if let Some(binary_data) = &self.binary_data {
+                        self.search_state.search(
+                            binary_data,
+                            Search::XRef {
+                                address: symbol.address,
+                            },
+                        );
+                        self.active_pane = Pane::Search;
+                    }
                 }
             }
             Pane::Search => {
@@ -349,24 +337,23 @@ impl<'data> App<'data> {
         }
     }
 
-    pub fn find_xrefs(&mut self, address: u64) {
-        if let Some(binary_data) = &self.binary_data {
-            self.search_state.set_search_type(SearchType::XRef);
-            self.search_state.find_xrefs(binary_data, address);
-        }
-    }
-
     pub fn find_strings(&mut self) {
         if let Some(binary_data) = &self.binary_data {
-            self.search_state.set_search_type(SearchType::String);
-            self.search_state.find_strings(binary_data, 4); // Minimum length of 4
+            self.search_state
+                .search(binary_data, Search::String { min_length: 4 });
+            self.active_pane = Pane::Search;
         }
     }
 
     pub fn find_byte_pattern(&mut self, pattern: &str) {
         if let Some(binary_data) = &self.binary_data {
-            self.search_state.set_search_type(SearchType::BytePattern);
-            self.search_state.find_byte_pattern(binary_data, pattern);
+            self.search_state.search(
+                binary_data,
+                Search::BytePattern {
+                    pattern: pattern.to_string(),
+                },
+            );
+            self.active_pane = Pane::Search;
         }
     }
 
@@ -413,9 +400,39 @@ impl<'data> App<'data> {
         self.show_log = !self.show_log;
     }
 
-    pub fn follow_address_reference(&mut self) {
-        if self.active_pane == Pane::Disassembly {
-            self.disassembly_state.follow_address_reference();
+    pub fn navigate_back(&mut self) {
+        match self.active_pane {
+            Pane::Disassembly => {
+                if let Some(binary_data) = &self.binary_data {
+                    self.disassembly_state.navigate_back(binary_data);
+                }
+            }
+            Pane::Search => {
+                if let Some(binary_data) = &self.binary_data {
+                    if let Some(address) = self.search_state.navigate_back(binary_data) {
+                        self.disassembly_state.set_current_address(address);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn navigate_forward(&mut self) {
+        match self.active_pane {
+            Pane::Disassembly => {
+                if let Some(binary_data) = &self.binary_data {
+                    self.disassembly_state.navigate_forward(binary_data);
+                }
+            }
+            Pane::Search => {
+                if let Some(binary_data) = &self.binary_data {
+                    if let Some(address) = self.search_state.navigate_forward(binary_data) {
+                        self.disassembly_state.set_current_address(address);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -510,10 +527,9 @@ pub fn run_app<'data, B: Backend>(
                             KeyCode::Esc => app.find_xref(),
                             KeyCode::Backspace => app.search_state.remove_from_query(),
                             KeyCode::Enter => {
-                                app.find_xrefs(
-                                    u64::from_str_radix(&app.search_state.query, 16).unwrap(),
-                                );
-                                app.search_state.toggle_search_mode();
+                                if let Some(binary_data) = &app.binary_data {
+                                    app.search_state.submit_query(binary_data);
+                                }
                             }
                             KeyCode::Char(c) if c.is_ascii_hexdigit() || c == 'x' => {
                                 app.search_state.add_to_query(c)
@@ -566,13 +582,17 @@ pub fn run_app<'data, B: Backend>(
                             }
                             KeyCode::Char('g') => app.jump_to_top(),
                             KeyCode::Char('G') => app.jump_to_bottom(),
-                            KeyCode::Char('h') if !ctrl => app.disassembly_state.navigate_back(),
-                            KeyCode::Char('l') if !ctrl => app.disassembly_state.navigate_forward(),
+                            KeyCode::Char('h') if !ctrl => app.navigate_back(),
+                            KeyCode::Char('l') if !ctrl => app.navigate_forward(),
                             KeyCode::Char('L') => app.toggle_log(),
 
                             KeyCode::Char('/') => app.toggle_search(),
-                            KeyCode::Char('x') => {
-                                app.find_xref();
+                            KeyCode::Char('x') => app.find_xref(),
+                            KeyCode::Char('s') => app.find_strings(),
+                            KeyCode::Char('p') => {
+                                app.search_state.toggle_search_mode();
+                                //app.search_state.set_search_type(SearchType::BytePattern);
+                                app.active_pane = Pane::Search;
                             }
                             KeyCode::Enter => {
                                 if app.active_pane == Pane::Symbols {
@@ -581,7 +601,7 @@ pub fn run_app<'data, B: Backend>(
                                     app.select_search_result();
                                 }
                             }
-                            KeyCode::Char('f') => app.follow_address_reference(),
+                            KeyCode::Char('f') => app.navigate_back(),
                             _ => {}
                         }
                     }

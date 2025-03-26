@@ -218,7 +218,7 @@ impl DisassemblyState {
         }
     }
 
-    pub fn navigate_back(&mut self) {
+    pub fn navigate_back(&mut self, _binary_data: &BinaryData) {
         if self.navigation_index > 0 {
             self.navigation_index -= 1;
             let entry = &self.navigation_stack[self.navigation_index];
@@ -228,7 +228,7 @@ impl DisassemblyState {
         }
     }
 
-    pub fn navigate_forward(&mut self) {
+    pub fn navigate_forward(&mut self, _binary_data: &BinaryData) {
         if self.navigation_index < self.navigation_stack.len() - 1 {
             self.navigation_index += 1;
             let entry = &self.navigation_stack[self.navigation_index];

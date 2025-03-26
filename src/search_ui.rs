@@ -58,9 +58,16 @@ pub enum SearchResultData {
 /// Navigation entry for search history
 #[derive(Clone, Debug)]
 pub struct SearchNavigationEntry {
-    pub search_type: SearchType,
-    pub query: String,
+    pub search: Search,
     pub list_state: ListState,
+}
+
+/// Add this enum to represent different search types with their parameters
+#[derive(Clone, Debug)]
+pub enum Search {
+    XRef { address: u64 },
+    String { min_length: usize },
+    BytePattern { pattern: String },
 }
 
 /// State for the search widget
@@ -69,8 +76,6 @@ pub struct SearchState {
     list_state: ListState,
     /// Current search query
     pub query: String,
-    /// Current search type
-    pub search_type: SearchType,
     /// Whether we're in search mode
     pub search_mode: bool,
     /// Current search results
@@ -87,7 +92,6 @@ impl SearchState {
         Self {
             list_state: ListState::default(),
             query: String::new(),
-            search_type: SearchType::XRef,
             search_mode: false,
             results: Vec::new(),
             navigation_stack: Vec::new(),
@@ -101,11 +105,6 @@ impl SearchState {
         if self.search_mode {
             self.query.clear();
         }
-    }
-
-    /// Sets the search type
-    pub fn set_search_type(&mut self, search_type: SearchType) {
-        self.search_type = search_type;
     }
 
     /// Adds a character to the query
@@ -132,174 +131,193 @@ impl SearchState {
         self.list_state.select(index);
     }
 
-    /// Gets the current offset
-    pub fn offset(&self) -> usize {
-        self.list_state.offset()
-    }
-
-    /// Gets a mutable reference to the offset
-    pub fn offset_mut(&mut self) -> &mut usize {
-        self.list_state.offset_mut()
-    }
-
     pub fn scroll_up(&mut self, amount: usize) {
         self.list_state.scroll_up_by(amount as u16);
+        self.update_nav();
     }
 
     pub fn scroll_down(&mut self, amount: usize) {
         self.list_state.scroll_down_by(amount as u16);
+        self.update_nav();
     }
 
     pub fn jump_to_top(&mut self) {
         jump_to_top(&mut self.list_state);
+        self.update_nav();
     }
 
     pub fn jump_to_bottom(&mut self) {
         jump_to_bottom(&mut self.list_state, self.results.len());
+        self.update_nav();
     }
 
-    /// Sets the search results and updates navigation history
-    pub fn set_results(&mut self, results: Vec<SearchResult>) {
+    fn update_nav(&mut self) {
+        if let Some(nav) = self.navigation_stack.get_mut(self.navigation_index) {
+            nav.list_state = self.list_state.clone();
+        }
+        self.dbg_nav("  ");
+    }
+
+    /// Sets the search results
+    pub fn set_results(&mut self, search: Search, results: Vec<SearchResult>, update_nav: bool) {
         self.results = results;
         self.select(Some(0));
 
-        // Add to navigation stack if this is a new search
-        let entry = SearchNavigationEntry {
-            search_type: self.search_type.clone(),
-            query: self.query.clone(),
-            list_state: ListState::default(),
-        };
-
-        // If we're navigating through history, update the current entry
-        if self.navigation_index < self.navigation_stack.len() {
-            // Only push to navigation stack if this is a new navigation (not from history)
-            self.navigation_index += 1;
-
+        if update_nav {
+            if !self.navigation_stack.is_empty() {
+                self.navigation_index += 1;
+            }
+            let entry = SearchNavigationEntry {
+                search,
+                list_state: self.list_state.clone(),
+            };
             if let Some(existing) = self.navigation_stack.get_mut(self.navigation_index) {
                 *existing = entry;
-                // Truncate the stack to remove any forward history
                 self.navigation_stack.truncate(self.navigation_index + 1);
             } else {
                 self.navigation_stack.push(entry);
             }
-        } else {
-            // This is a new search, add it to the stack
-            self.navigation_stack.push(entry);
-            self.navigation_index = self.navigation_stack.len() - 1;
         }
+        self.dbg_nav("++");
     }
-
-    /// Navigates back in the search history
-    pub fn navigate_back(&mut self) {
-        if self.navigation_index > 0 {
-            // Save current state
-            if let Some(current) = self.navigation_stack.get_mut(self.navigation_index) {
-                current.list_state = self.list_state.clone();
-            }
-
-            // Move back
+    pub fn navigate_back(&mut self, binary_data: &BinaryData) -> Option<u64> {
+        let r = if self.navigation_index > 0 {
             self.navigation_index -= 1;
             let entry = &self.navigation_stack[self.navigation_index];
 
             // Restore state
-            self.search_type = entry.search_type.clone();
-            self.query = entry.query.clone();
-            self.list_state = entry.list_state.clone();
+            self.query.clear(); // TODO restore query?
+            let state = entry.list_state.clone();
+            self.search_internal(binary_data, entry.search.clone());
+            self.list_state = state;
 
-            // Need to reload search results for this query
-            // This would typically be done by the App
-        }
+            self.selected_result().map(|r| r.address)
+        } else {
+            None
+        };
+        self.dbg_nav("< ");
+        r
     }
 
-    /// Navigates forward in the search history
-    pub fn navigate_forward(&mut self) {
-        if self.navigation_index < self.navigation_stack.len() - 1 {
-            // Save current state
-            if let Some(current) = self.navigation_stack.get_mut(self.navigation_index) {
-                current.list_state = self.list_state.clone();
-            }
-
-            // Move forward
+    pub fn navigate_forward(&mut self, binary_data: &BinaryData) -> Option<u64> {
+        let r = if self.navigation_index < self.navigation_stack.len() - 1 {
             self.navigation_index += 1;
             let entry = &self.navigation_stack[self.navigation_index];
 
             // Restore state
-            self.search_type = entry.search_type.clone();
-            self.query = entry.query.clone();
-            self.list_state = entry.list_state.clone();
+            self.query.clear(); // TODO restore query?
+            let state = entry.list_state.clone();
+            self.search_internal(binary_data, entry.search.clone());
+            self.list_state = state;
 
-            // Need to reload search results for this query
-            // This would typically be done by the App
+            self.selected_result().map(|r| r.address)
+        } else {
+            None
+        };
+        self.dbg_nav(" >");
+        r
+    }
+
+    fn dbg_nav(&self, from: &str) {
+        let stack: Vec<_> = self
+            .navigation_stack
+            .iter()
+            .map(|entry| {
+                format!(
+                    "{}:{}",
+                    entry.list_state.offset(),
+                    entry
+                        .list_state
+                        .selected()
+                        .map(|s| s.to_string())
+                        .unwrap_or("-".to_string())
+                )
+            })
+            .collect();
+        tracing::info!(
+            "nav {from} index={} len={} stack=[{}]",
+            self.navigation_index,
+            self.navigation_stack.len(),
+            stack.join(" ")
+        );
+    }
+
+    pub fn submit_query(&mut self, binary_data: &BinaryData) {
+        self.search(
+            binary_data,
+            Search::XRef {
+                address: u64::from_str_radix(&self.query, 16).unwrap(),
+            },
+        );
+        self.toggle_search_mode();
+    }
+
+    /// Add a unified search function that takes a Search enum
+    pub fn search(&mut self, binary_data: &BinaryData, search: Search) {
+        let results = self.run_search(binary_data, &search);
+        self.set_results(search, results, true);
+    }
+
+    /// Run search without touching nav
+    fn search_internal(&mut self, binary_data: &BinaryData, search: Search) {
+        let results = self.run_search(binary_data, &search);
+        self.set_results(search, results, false);
+    }
+
+    fn run_search(&mut self, binary_data: &BinaryData, search: &Search) -> Vec<SearchResult> {
+        match &search {
+            Search::XRef { address } => {
+                let config = [PatternConfig::xref(
+                    (),
+                    "".into(),
+                    None,
+                    patternsleuth_image::scanner::Xref(*address as usize),
+                )];
+
+                let res = binary_data.file.scan(&config).unwrap();
+
+                res.results
+                    .into_iter()
+                    .map(|(_, r)| SearchResult {
+                        address: r.address as u64,
+                        search_type: SearchType::XRef,
+                        data: SearchResultData::XRef {
+                            to_address: *address,
+                            kind: XRefKind::Call,
+                            instruction: format!("call 0x{:X}", address),
+                        },
+                    })
+                    .collect()
+            }
+            Search::String { min_length } => {
+                // Just add a placeholder result for now
+                vec![SearchResult {
+                    address: 0x1000,
+                    search_type: SearchType::String,
+                    data: SearchResultData::String {
+                        value: "Example string".to_string(),
+                        length: 14,
+                        is_wide: false,
+                    },
+                }]
+            }
+            Search::BytePattern { pattern } => {
+                // Just add a placeholder result for now
+                vec![SearchResult {
+                    address: 0x2000,
+                    search_type: SearchType::BytePattern,
+                    data: SearchResultData::BytePattern {
+                        pattern: pattern.clone(),
+                        bytes: vec![0x90, 0x90, 0x90], // Example: NOP NOP NOP
+                    },
+                }]
+            }
         }
     }
 
     /// Gets the selected search result
     pub fn selected_result(&self) -> Option<&SearchResult> {
         self.selected().and_then(|idx| self.results.get(idx))
-    }
-
-    /// Finds XRefs for an address in the binary
-    pub fn find_xrefs(&mut self, binary_data: &BinaryData, address: u64) {
-        let config = [PatternConfig::xref(
-            (),
-            "".into(),
-            None,
-            patternsleuth_image::scanner::Xref(address as usize),
-        )];
-
-        let res = binary_data.file.scan(&config).unwrap();
-
-        self.set_results(
-            res.results
-                .into_iter()
-                .map(|(_, r)| SearchResult {
-                    address: r.address as u64,
-                    search_type: SearchType::XRef,
-                    data: SearchResultData::XRef {
-                        to_address: address,
-                        kind: XRefKind::Call,
-                        instruction: format!("call 0x{:X}", address),
-                    },
-                })
-                .collect(),
-        );
-    }
-
-    /// Finds strings in the binary
-    pub fn find_strings(&mut self, binary_data: &BinaryData, min_length: usize) {
-        // Stub implementation - would scan for strings in the binary
-        let mut results = Vec::new();
-
-        // Just add a placeholder result for now
-        results.push(SearchResult {
-            address: 0x1000,
-            search_type: SearchType::String,
-            data: SearchResultData::String {
-                value: "Example string".to_string(),
-                length: 14,
-                is_wide: false,
-            },
-        });
-
-        self.set_results(results);
-    }
-
-    /// Finds byte patterns in the binary
-    pub fn find_byte_pattern(&mut self, binary_data: &BinaryData, pattern: &str) {
-        // Stub implementation - would scan for the byte pattern in the binary
-        let mut results = Vec::new();
-
-        // Just add a placeholder result for now
-        results.push(SearchResult {
-            address: 0x2000,
-            search_type: SearchType::BytePattern,
-            data: SearchResultData::BytePattern {
-                pattern: pattern.to_string(),
-                bytes: vec![0x90, 0x90, 0x90], // Example: NOP NOP NOP
-            },
-        });
-
-        self.set_results(results);
     }
 }
 
