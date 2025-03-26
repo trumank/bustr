@@ -76,7 +76,7 @@ impl<'data> App<'data> {
             symbols: Vec::new(),
             show_help: false,
             should_quit: false,
-            show_log: true,
+            show_log: false,
 
             active_pane: Pane::Disassembly,
             search_mode: false,
@@ -343,18 +343,6 @@ impl<'data> App<'data> {
                 }
             }
             _ => {}
-        }
-    }
-
-    pub fn find_byte_pattern(&mut self, pattern: &str) {
-        if let Some(binary_data) = &self.binary_data {
-            self.search_state.search(
-                binary_data,
-                Search::BytePattern {
-                    pattern: pattern.to_string(),
-                },
-            );
-            self.active_pane = Pane::Search;
         }
     }
 

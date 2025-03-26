@@ -40,19 +40,9 @@ pub struct SearchResult {
 /// Data specific to each search type
 #[derive(Clone, Debug)]
 pub enum SearchResultData {
-    XRef {
-        to_address: u64,
-        kind: XRefKind,
-        instruction: String,
-    },
-    String {
-        value: String,
-        is_wide: bool,
-    },
-    BytePattern {
-        pattern: String,
-        bytes: Vec<u8>,
-    },
+    XRef { to_address: u64, kind: XRefKind },
+    String { value: String, is_wide: bool },
+    BytePattern { pattern: String, bytes: Vec<u8> },
 }
 
 /// Navigation entry for search history
@@ -218,28 +208,28 @@ impl SearchState {
         r
     }
 
-    fn dbg_nav(&self, from: &str) {
-        let stack: Vec<_> = self
-            .navigation_stack
-            .iter()
-            .map(|entry| {
-                format!(
-                    "{}:{}",
-                    entry.list_state.offset(),
-                    entry
-                        .list_state
-                        .selected()
-                        .map(|s| s.to_string())
-                        .unwrap_or("-".to_string())
-                )
-            })
-            .collect();
-        tracing::info!(
-            "nav {from} index={} len={} stack=[{}]",
-            self.navigation_index,
-            self.navigation_stack.len(),
-            stack.join(" ")
-        );
+    fn dbg_nav(&self, _from: &str) {
+        //let stack: Vec<_> = self
+        //    .navigation_stack
+        //    .iter()
+        //    .map(|entry| {
+        //        format!(
+        //            "{}:{}",
+        //            entry.list_state.offset(),
+        //            entry
+        //                .list_state
+        //                .selected()
+        //                .map(|s| s.to_string())
+        //                .unwrap_or("-".to_string())
+        //        )
+        //    })
+        //    .collect();
+        //tracing::info!(
+        //    "nav {from} index={} len={} stack=[{}]",
+        //    self.navigation_index,
+        //    self.navigation_stack.len(),
+        //    stack.join(" ")
+        //);
     }
 
     pub fn submit_query(&mut self, binary_data: &BinaryData) {
@@ -248,6 +238,14 @@ impl SearchState {
         {
             Search::String {
                 string: string.into(),
+            }
+        } else if query
+            .split_whitespace()
+            .next()
+            .is_some_and(|f| f.len() == 2)
+        {
+            Search::BytePattern {
+                pattern: query.to_string(),
             }
         } else {
             Search::XRef {
@@ -290,24 +288,21 @@ impl SearchState {
                         data: SearchResultData::XRef {
                             to_address: *address,
                             kind: XRefKind::Call,
-                            instruction: format!("call 0x{:X}", address),
                         },
                     })
                     .collect()
             }
             Search::String { string } => {
-                let pattern = string
-                    .as_bytes()
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let config = [PatternConfig::new(
-                    (),
-                    "".into(),
-                    None,
-                    Pattern::new(pattern).unwrap(),
-                )];
+                let utf8 = string.as_bytes().to_vec();
+                let utf16 = string
+                    .encode_utf16()
+                    .flat_map(|c| c.to_le_bytes())
+                    .collect::<Vec<_>>();
+
+                let config = [
+                    PatternConfig::new((), "".into(), None, Pattern::from_bytes(utf8).unwrap()),
+                    PatternConfig::new((), "".into(), None, Pattern::from_bytes(utf16).unwrap()),
+                ];
 
                 let res = binary_data.file.scan(&config).unwrap();
 
@@ -324,15 +319,31 @@ impl SearchState {
                     .collect()
             }
             Search::BytePattern { pattern } => {
-                // Just add a placeholder result for now
-                vec![SearchResult {
-                    address: 0x2000,
-                    search_type: SearchType::BytePattern,
-                    data: SearchResultData::BytePattern {
-                        pattern: pattern.clone(),
-                        bytes: vec![0x90, 0x90, 0x90], // Example: NOP NOP NOP
-                    },
-                }]
+                let config = [PatternConfig::new(
+                    (),
+                    "".into(),
+                    None,
+                    Pattern::new(pattern).unwrap(),
+                )];
+
+                let res = binary_data.file.scan(&config).unwrap();
+
+                res.results
+                    .into_iter()
+                    .map(|(_, r)| SearchResult {
+                        address: r.address as u64,
+                        search_type: SearchType::BytePattern,
+                        data: SearchResultData::BytePattern {
+                            pattern: pattern.clone(),
+                            bytes: binary_data
+                                .file
+                                .memory
+                                .range(r.address..r.address + pattern.len())
+                                .unwrap()
+                                .to_vec(),
+                        },
+                    })
+                    .collect()
             }
         }
     }
@@ -367,11 +378,7 @@ impl StatefulWidget for SearchWidget {
                 range: std::ops::Range<usize>,
             ) -> impl ExactSizeIterator<Item = ListItem<'a>> {
                 self.0[range].iter().map(|result| match &result.data {
-                    SearchResultData::XRef {
-                        to_address,
-                        kind,
-                        instruction,
-                    } => {
+                    SearchResultData::XRef { to_address, kind } => {
                         let kind_str = match kind {
                             XRefKind::Call => "call",
                             XRefKind::Jump => "jmp",
