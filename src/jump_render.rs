@@ -154,9 +154,23 @@ mod tests {
     use super::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::text::Line;
     use ratatui::widgets::{List, ListItem};
 
+    fn verify_layout(jumps: &Jumps) {
+        let jumps = &jumps.jumps;
+        for a in 0..jumps.len() {
+            for b in 0..jumps.len() {
+                if a != b && jumps[a].overlaps_with(&jumps[b]) {
+                    assert_ne!(jumps[a].column, jumps[b].column, "overlapping edges");
+                }
+            }
+        }
+    }
+
     fn render_to_string(jumps: &Jumps) -> String {
+        verify_layout(jumps);
+
         let start = jumps.jumps.iter().map(|j| j.start).min().unwrap();
         let end = jumps.jumps.iter().map(|j| j.end).max().unwrap();
 
