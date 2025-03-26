@@ -299,22 +299,47 @@ impl SearchState {
                     .flat_map(|c| c.to_le_bytes())
                     .collect::<Vec<_>>();
 
+                #[derive(PartialEq)]
+                enum S {
+                    A,
+                    W,
+                }
+
                 let config = [
-                    PatternConfig::new((), "".into(), None, Pattern::from_bytes(utf8).unwrap()),
-                    PatternConfig::new((), "".into(), None, Pattern::from_bytes(utf16).unwrap()),
+                    PatternConfig::new(S::A, "".into(), None, Pattern::from_bytes(utf8).unwrap()),
+                    PatternConfig::new(S::W, "".into(), None, Pattern::from_bytes(utf16).unwrap()),
                 ];
 
                 let res = binary_data.file.scan(&config).unwrap();
 
                 res.results
                     .into_iter()
-                    .map(|(_, r)| SearchResult {
-                        address: r.address as u64,
-                        search_type: SearchType::String,
-                        data: SearchResultData::String {
-                            value: string.to_string(),
-                            is_wide: false,
-                        },
+                    .map(|(s, r)| {
+                        let data = binary_data.file.memory.range_from(r.address..).unwrap();
+                        let max = 100;
+                        let value = match s.sig {
+                            S::A => {
+                                let len = data[..max].iter().position(|c| *c == 0).unwrap_or(max);
+                                String::from_utf8_lossy(&data[..len]).to_string()
+                            }
+                            S::W => {
+                                let chars = data[..max + 2]
+                                    .chunks(2)
+                                    .map(|c| u16::from_le_bytes(c.try_into().unwrap()))
+                                    .take_while(|c| *c != 0)
+                                    .collect::<Vec<_>>();
+                                String::from_utf16_lossy(&chars).to_string()
+                            }
+                        };
+
+                        SearchResult {
+                            address: r.address as u64,
+                            search_type: SearchType::String,
+                            data: SearchResultData::String {
+                                value,
+                                is_wide: s.sig == S::W,
+                            },
+                        }
                     })
                     .collect()
             }
