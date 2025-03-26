@@ -462,7 +462,7 @@ impl StatefulWidget for SearchWidget {
 
         // Always render the query bar, but style it differently when not in search mode
         let query_text = if state.search_mode {
-            format!("Address: {}", state.query)
+            format!("Search: {}", state.query)
         } else {
             "Press '/' to search".to_string()
         };
