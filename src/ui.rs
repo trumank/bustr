@@ -253,12 +253,18 @@ impl<'data> App<'data> {
 
     // Add methods for search functionality
     pub fn toggle_search(&mut self) {
-        if self.active_pane == Pane::Symbols {
-            self.search_mode = !self.search_mode;
-            if self.search_mode {
-                self.search_query.clear();
-                self.update_filtered_symbols(false);
+        match self.active_pane {
+            Pane::Symbols => {
+                self.search_mode = !self.search_mode;
+                if self.search_mode {
+                    self.search_query.clear();
+                    self.update_filtered_symbols(false);
+                }
             }
+            Pane::Search => {
+                self.search_state.toggle_search_mode();
+            }
+            _ => {}
         }
     }
 
@@ -272,13 +278,6 @@ impl<'data> App<'data> {
     pub fn backspace_search(&mut self) {
         if self.search_mode && !self.search_query.is_empty() {
             self.search_query.pop();
-            self.update_filtered_symbols(false);
-        }
-    }
-
-    pub fn clear_search(&mut self) {
-        if self.search_mode {
-            self.search_query.clear();
             self.update_filtered_symbols(false);
         }
     }
@@ -331,17 +330,19 @@ impl<'data> App<'data> {
                 }
             }
             Pane::Search => {
-                self.search_state.toggle_search_mode();
+                if let Some(search_item) = self.search_state.selected_result() {
+                    if let Some(binary_data) = &self.binary_data {
+                        self.search_state.search(
+                            binary_data,
+                            Search::XRef {
+                                address: search_item.address,
+                            },
+                        );
+                        self.active_pane = Pane::Search;
+                    }
+                }
             }
             _ => {}
-        }
-    }
-
-    pub fn find_strings(&mut self) {
-        if let Some(binary_data) = &self.binary_data {
-            self.search_state
-                .search(binary_data, Search::String { min_length: 4 });
-            self.active_pane = Pane::Search;
         }
     }
 
@@ -531,9 +532,7 @@ pub fn run_app<'data, B: Backend>(
                                     app.search_state.submit_query(binary_data);
                                 }
                             }
-                            KeyCode::Char(c) if c.is_ascii_hexdigit() || c == 'x' => {
-                                app.search_state.add_to_query(c)
-                            }
+                            KeyCode::Char(c) => app.search_state.add_to_query(c),
                             _ => {}
                         }
                     } else if app.active_pane == Pane::Symbols && app.search_mode && !ctrl {
@@ -588,7 +587,6 @@ pub fn run_app<'data, B: Backend>(
 
                             KeyCode::Char('/') => app.toggle_search(),
                             KeyCode::Char('x') => app.find_xref(),
-                            KeyCode::Char('s') => app.find_strings(),
                             KeyCode::Char('p') => {
                                 app.search_state.toggle_search_mode();
                                 //app.search_state.set_search_type(SearchType::BytePattern);
@@ -601,7 +599,7 @@ pub fn run_app<'data, B: Backend>(
                                     app.select_search_result();
                                 }
                             }
-                            KeyCode::Char('f') => app.navigate_back(),
+                            KeyCode::Char('f') => app.disassembly_state.follow_address_reference(),
                             _ => {}
                         }
                     }

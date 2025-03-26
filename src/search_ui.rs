@@ -4,6 +4,7 @@ use crate::{
     ui::{jump_to_bottom, jump_to_top},
 };
 use patternsleuth_image::PatternConfig;
+use patternsleuth_scanner::Pattern;
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
@@ -46,7 +47,6 @@ pub enum SearchResultData {
     },
     String {
         value: String,
-        length: usize,
         is_wide: bool,
     },
     BytePattern {
@@ -66,7 +66,7 @@ pub struct SearchNavigationEntry {
 #[derive(Clone, Debug)]
 pub enum Search {
     XRef { address: u64 },
-    String { min_length: usize },
+    String { string: String },
     BytePattern { pattern: String },
 }
 
@@ -243,12 +243,18 @@ impl SearchState {
     }
 
     pub fn submit_query(&mut self, binary_data: &BinaryData) {
-        self.search(
-            binary_data,
+        let query = &self.query;
+        let search = if let Some(string) = query.strip_prefix('"').and_then(|q| q.strip_suffix('"'))
+        {
+            Search::String {
+                string: string.into(),
+            }
+        } else {
             Search::XRef {
                 address: u64::from_str_radix(&self.query, 16).unwrap(),
-            },
-        );
+            }
+        };
+        self.search(binary_data, search);
         self.toggle_search_mode();
     }
 
@@ -289,17 +295,33 @@ impl SearchState {
                     })
                     .collect()
             }
-            Search::String { min_length } => {
-                // Just add a placeholder result for now
-                vec![SearchResult {
-                    address: 0x1000,
-                    search_type: SearchType::String,
-                    data: SearchResultData::String {
-                        value: "Example string".to_string(),
-                        length: 14,
-                        is_wide: false,
-                    },
-                }]
+            Search::String { string } => {
+                let pattern = string
+                    .as_bytes()
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let config = [PatternConfig::new(
+                    (),
+                    "".into(),
+                    None,
+                    Pattern::new(pattern).unwrap(),
+                )];
+
+                let res = binary_data.file.scan(&config).unwrap();
+
+                res.results
+                    .into_iter()
+                    .map(|(_, r)| SearchResult {
+                        address: r.address as u64,
+                        search_type: SearchType::String,
+                        data: SearchResultData::String {
+                            value: string.to_string(),
+                            is_wide: false,
+                        },
+                    })
+                    .collect()
             }
             Search::BytePattern { pattern } => {
                 // Just add a placeholder result for now
@@ -360,17 +382,10 @@ impl StatefulWidget for SearchWidget {
                             Style::default().fg(Color::White),
                         )]))
                     }
-                    SearchResultData::String {
-                        value,
-                        length,
-                        is_wide,
-                    } => {
+                    SearchResultData::String { value, is_wide } => {
                         let prefix = if *is_wide { "L" } else { "" };
                         ListItem::new(Line::from(vec![Span::styled(
-                            format!(
-                                "{:016X} string ({} chars): {}\"{}\"",
-                                result.address, length, prefix, value
-                            ),
+                            format!("{:016X} : {}\"{}\"", result.address, prefix, value),
                             Style::default().fg(Color::Green),
                         )]))
                     }
@@ -417,7 +432,7 @@ impl StatefulWidget for SearchWidget {
         let query_text = if state.search_mode {
             format!("Address: {}", state.query)
         } else {
-            "Press 'x' to enter address".to_string()
+            "Press '/' to search".to_string()
         };
 
         let query_style = if state.search_mode {
