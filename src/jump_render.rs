@@ -104,52 +104,34 @@ impl Jumps {
             bins.into_values().collect::<Vec<_>>()
         };
 
-        // Sort jumps by start position
-        groups.sort_by_key(|t| t.start);
+        // Sort jumps by length, then start position
+        groups.sort_by_key(|t| (t.end - t.start, t.start));
 
         // Track active jumps at each position
-        let mut active_columns: Vec<Option<usize>> = Vec::new();
+        let mut columns: Vec<Vec<&JumpGroup>> = Vec::new();
 
-        for group_idx in 0..groups.len() {
-            // Find the first available column
-            let mut column = 0;
-            loop {
-                // Extend active_columns if needed
-                if column >= active_columns.len() {
-                    active_columns.push(None);
+        for group in &groups {
+            let mut available = None;
+            for (c, column) in columns.iter().enumerate() {
+                if column.iter().all(|other| !group.overlaps_with(other)) {
+                    available = Some(c);
                     break;
                 }
-
-                // Check if this column is available
-                let Some(other_idx) = active_columns[column] else {
-                    break;
-                };
-
-                // Check if the group in this column overlaps
-                let other_group = &groups[other_idx];
-
-                if !groups[group_idx].overlaps_with(other_group) {
-                    break;
-                }
-
-                column += 1;
             }
+            let column = available.unwrap_or_else(|| {
+                columns.push(vec![]);
+                columns.len() - 1
+            });
 
-            let group = &groups[group_idx];
+            columns[column].push(&group);
 
             // Assign the column
             for jump_idx in &group.jumps_idx {
                 jumps[*jump_idx].column = column;
             }
-
-            // Mark this column as used by this group
-            while column >= active_columns.len() {
-                active_columns.push(None);
-            }
-            active_columns[column] = Some(group_idx);
         }
 
-        active_columns.len()
+        columns.len()
     }
 }
 
