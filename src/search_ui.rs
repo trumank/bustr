@@ -13,34 +13,17 @@ use ratatui::{
     widgets::{Block, Borders, ListItem, ListState, Paragraph, StatefulWidget, Widget},
 };
 
-/// Types of searches
-#[derive(Clone, PartialEq, Debug)]
-pub enum SearchType {
-    XRef,
-    String,
-    BytePattern,
-}
-
-/// Types of cross-references
-#[derive(Clone, PartialEq, Debug)]
-pub enum XRefKind {
-    Call,
-    Jump,
-    DataRef,
-}
-
 /// Information about a search result
 #[derive(Clone, Debug)]
 pub struct SearchResult {
     pub address: u64,
-    pub search_type: SearchType,
     pub data: SearchResultData,
 }
 
 /// Data specific to each search type
 #[derive(Clone, Debug)]
 pub enum SearchResultData {
-    XRef { to_address: u64, kind: XRefKind },
+    XRef { to_address: u64 },
     String { value: String, is_wide: bool },
     BytePattern { pattern: String, bytes: Vec<u8> },
 }
@@ -284,10 +267,8 @@ impl SearchState {
                     .into_iter()
                     .map(|(_, r)| SearchResult {
                         address: r.address as u64,
-                        search_type: SearchType::XRef,
                         data: SearchResultData::XRef {
                             to_address: *address,
-                            kind: XRefKind::Call,
                         },
                     })
                     .collect()
@@ -334,7 +315,6 @@ impl SearchState {
 
                         SearchResult {
                             address: r.address as u64,
-                            search_type: SearchType::String,
                             data: SearchResultData::String {
                                 value,
                                 is_wide: s.sig == S::W,
@@ -357,7 +337,6 @@ impl SearchState {
                     .into_iter()
                     .map(|(_, r)| SearchResult {
                         address: r.address as u64,
-                        search_type: SearchType::BytePattern,
                         data: SearchResultData::BytePattern {
                             pattern: pattern.clone(),
                             bytes: binary_data
@@ -403,14 +382,9 @@ impl StatefulWidget for SearchWidget {
                 range: std::ops::Range<usize>,
             ) -> impl ExactSizeIterator<Item = ListItem<'a>> {
                 self.0[range].iter().map(|result| match &result.data {
-                    SearchResultData::XRef { to_address, kind } => {
-                        let kind_str = match kind {
-                            XRefKind::Call => "call",
-                            XRefKind::Jump => "jmp",
-                            XRefKind::DataRef => "ref",
-                        };
+                    SearchResultData::XRef { to_address } => {
                         ListItem::new(Line::from(vec![Span::styled(
-                            format!("{:016X} {} {:016X}", result.address, kind_str, to_address),
+                            format!("{:016X} xref {:016X}", result.address, to_address),
                             Style::default().fg(Color::White),
                         )]))
                     }

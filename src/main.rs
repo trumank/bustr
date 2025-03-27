@@ -220,18 +220,14 @@ impl FormatterOutput for PlainFormatterOutput<'_> {
 }
 
 // Add a new struct to hold the binary data
-struct BinaryData<'data> {
+pub struct BinaryData<'data> {
     pub file: Image<'data>,
     pub symbols: Vec<SymbolInfo>,
     pub symbol_map: HashMap<u64, Vec<SymbolInfo>>,
 }
 
 impl<'data> BinaryData<'data> {
-    pub fn new(
-        data: &'data [u8],
-        file_path: &Path,
-        pdb_path: Option<&Path>,
-    ) -> anyhow::Result<Self> {
+    pub fn new(data: &'data [u8], pdb_path: Option<&Path>) -> anyhow::Result<Self> {
         let file = ImageBuilder::default().build(data)?;
 
         // Load symbols from PDB if available, otherwise from object file
@@ -434,7 +430,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let data = std::fs::read(&args.input)?;
 
     // Load the binary data once
-    let binary_data = BinaryData::new(&data, &args.input, pdb)?;
+    let binary_data = BinaryData::new(&data, pdb)?;
 
     // Set up the terminal UI
     let mut terminal = setup_terminal()?;
@@ -443,6 +439,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut app = App::new();
     app.set_symbols(binary_data.symbols.clone());
     app.set_binary_data(binary_data);
+    app.file_path = Some(args.input);
 
     // Run the app
     let tick_rate = Duration::from_millis(250);

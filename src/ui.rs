@@ -46,7 +46,6 @@ pub struct App<'data> {
     pub disassembly_state: DisassemblyState,
     pub symbol_list_state: ListState,
     pub file_path: Option<PathBuf>,
-    pub pdb_path: Option<PathBuf>,
     pub binary_data: Option<BinaryData<'data>>,
     pub search_query: String,
     nucleo: nucleo::Nucleo<SymbolInfo>,
@@ -84,7 +83,6 @@ impl<'data> App<'data> {
             disassembly_state: DisassemblyState::new(),
             symbol_list_state: ListState::default(),
             file_path: None,
-            pdb_path: None,
             binary_data: None,
             search_query: String::new(),
             nucleo: nucleo::Nucleo::new(
@@ -556,7 +554,6 @@ pub fn run_app<'data, B: Backend>(
                             KeyCode::Char('x') => app.find_xref(),
                             KeyCode::Char('p') => {
                                 app.search_state.toggle_search_mode();
-                                //app.search_state.set_search_type(SearchType::BytePattern);
                                 app.active_pane = Pane::Search;
                             }
                             KeyCode::Enter => {
@@ -605,13 +602,21 @@ fn ui(f: &mut Frame, app: &mut App) {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
         .split(main_chunks[1]);
 
+    let file_name = app
+        .file_path
+        .as_ref()
+        .and_then(|p| p.file_name())
+        .map(|p| p.to_string_lossy())
+        .unwrap_or_default();
+
     let disassembly_widget = DisassemblyWidget::new()
         .block(
             Block::default()
                 .title(format!(
-                    "Disassembly @ 0x{:X} ({} lines)",
+                    "Disassembly @ 0x{:X} ({} lines) - {}",
                     app.disassembly_state.current_address(),
-                    app.disassembly_state.disassembly.len()
+                    app.disassembly_state.disassembly.len(),
+                    file_name
                 ))
                 .borders(Borders::ALL)
                 .border_style(if app.active_pane == Pane::Disassembly {
