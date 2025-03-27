@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 use ratatui::style::{Color, Style};
 use ratatui::text::Span;
@@ -52,6 +54,32 @@ impl JumpEdge {
             Direction::Down => self.end,
         }
     }
+
+    pub fn color(&self) -> Color {
+        let mut hasher = DefaultHasher::new();
+        self.dst().hash(&mut hasher);
+        let hash = hasher.finish();
+
+        // Use the hash to generate a color
+        // We'll use a set of distinct colors that work well together
+        let colors = [
+            Color::Green,
+            Color::Yellow,
+            Color::Blue,
+            Color::Magenta,
+            Color::Cyan,
+            Color::Red,
+            Color::LightGreen,
+            Color::LightYellow,
+            Color::LightBlue,
+            Color::LightMagenta,
+            Color::LightCyan,
+            Color::LightRed,
+            Color::DarkGray,
+        ];
+
+        colors[hash as usize % colors.len()]
+    }
 }
 
 #[derive(Debug)]
@@ -90,13 +118,15 @@ impl Jumps {
 
         // group edges by dst
         let mut groups = {
-            let mut bins: HashMap<u64, JumpGroup> = HashMap::new();
+            let mut bins: HashMap<(u64, Direction), JumpGroup> = HashMap::new();
             for (idx, jump) in jumps.iter().enumerate() {
-                let group = bins.entry(jump.dst()).or_insert(JumpGroup {
-                    start: u64::MAX,
-                    end: 0,
-                    jumps_idx: vec![],
-                });
+                let group = bins
+                    .entry((jump.dst(), jump.direction))
+                    .or_insert(JumpGroup {
+                        start: u64::MAX,
+                        end: 0,
+                        jumps_idx: vec![],
+                    });
                 group.jumps_idx.push(idx);
                 group.start = group.start.min(jump.start);
                 group.end = group.start.max(jump.end);
@@ -123,7 +153,7 @@ impl Jumps {
                 columns.len() - 1
             });
 
-            columns[column].push(&group);
+            columns[column].push(group);
 
             // Assign the column
             for jump_idx in &group.jumps_idx {
@@ -151,7 +181,11 @@ pub fn render_jumps(address: u64, jumps: &Jumps) -> Vec<Span> {
         let mut up = false;
         let mut down = false;
         let mut term = false;
+        let mut color = Color::default();
+        let mut direction = Direction::Down;
         for jump in &col {
+            color = jump.color();
+            direction = jump.direction;
             let start = address == jump.start;
             let end = address == jump.end;
             if address > jump.start {
@@ -162,28 +196,45 @@ pub fn render_jumps(address: u64, jumps: &Jumps) -> Vec<Span> {
             }
             if start || end {
                 term |= true;
-                termination = Some(());
+                termination = Some((direction, color));
             }
         }
         if col.is_empty() {
-            if let Some(termination) = termination {
-                grid[i * 2 + 0] = Span::styled("─", Style::default().fg(Color::Green));
-                grid[i * 2 + 1] = Span::styled("─", Style::default().fg(Color::Green));
+            if let Some((direction, color)) = termination {
+                let c = match direction {
+                    Direction::Up => "┉",
+                    Direction::Down => "─",
+                };
+                grid[i * 2 + 0] = Span::styled(c, Style::default().fg(color));
+                grid[i * 2 + 1] = Span::styled(c, Style::default().fg(color));
             }
         } else {
-            let c = match (up, down, term) {
-                (true, true, true) => "├",
-                (true, true, false) => "│",
-                (true, false, true) => "└",
-                (true, false, false) => "╵",
-                (false, true, true) => "┌",
-                (false, true, false) => "╷",
-                (false, false, true) => "╶",
-                (false, false, false) => unreachable!(),
+            use Direction::*;
+            let c = match (direction, up, down, term) {
+                (Up, true, true, true) => "┣",
+                (Up, true, true, false) => "┋",
+                (Up, true, false, true) => "┗",
+                (Up, true, false, false) => "╹",
+                (Up, false, true, true) => "┏",
+                (Up, false, true, false) => "╻",
+                (Up, false, false, true) => "╺",
+                (Up, false, false, false) => unreachable!(),
+                (Down, true, true, true) => "├",
+                (Down, true, true, false) => "│",
+                (Down, true, false, true) => "└",
+                (Down, true, false, false) => "╵",
+                (Down, false, true, true) => "┌",
+                (Down, false, true, false) => "╷",
+                (Down, false, false, true) => "╶",
+                (Down, false, false, false) => unreachable!(),
             };
-            grid[i * 2] = Span::styled(c, Style::default().fg(Color::Green));
-            if let Some(termination) = termination {
-                grid[i * 2 + 1] = Span::styled("─", Style::default().fg(Color::Green));
+            grid[i * 2] = Span::styled(c, Style::default().fg(color));
+            if let Some((direction, color)) = termination {
+                let c = match direction {
+                    Direction::Up => "┉",
+                    Direction::Down => "─",
+                };
+                grid[i * 2 + 1] = Span::styled(c, Style::default().fg(color));
             }
         }
     }
@@ -301,5 +352,32 @@ mod tests {
 
         let rendered = render_to_string(&jumps);
         println!("Converting\n{}", rendered);
+    }
+
+    #[test]
+    fn test_collision() {
+        let jumps = Jumps::new(vec![JumpEdge::new(2, 7), JumpEdge::new(10, 7)]);
+
+        let rendered = render_to_string(&jumps);
+        println!("Collision\n{}", rendered);
+    }
+
+    #[test]
+    fn test_color_consistency() {
+        // Test that the same destination always gets the same color
+        let jump1 = JumpEdge::new(1, 10);
+        let jump2 = JumpEdge::new(2, 10);
+        let jump3 = JumpEdge::new(3, 20);
+
+        assert_eq!(
+            jump1.color(),
+            jump2.color(),
+            "Same destination should have same color"
+        );
+        assert_ne!(
+            jump1.color(),
+            jump3.color(),
+            "Different destinations should have different colors"
+        );
     }
 }
