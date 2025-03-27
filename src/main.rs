@@ -8,11 +8,13 @@ mod ui;
 
 use clap::Parser;
 use iced_x86::{
-    Decoder, DecoderOptions, Formatter, FormatterOutput, FormatterTextKind, Instruction,
-    IntelFormatter,
+    Decoder, DecoderOptions, FlowControl, Formatter, FormatterOutput, FormatterTextKind,
+    Instruction, IntelFormatter, Mnemonic,
 };
 use patternsleuth_image::image::{Image, ImageBuilder};
 use pdb::{FallibleIterator, SymbolData};
+use ratatui::style::{Color, Style};
+use ratatui::text::Span;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fs;
@@ -169,10 +171,17 @@ pub enum DisassemblyLine {
     Instruction {
         address: u64,
         bytes: Vec<u8>,
-        instruction: String,
+        instruction: Vec<Span<'static>>,
         comments: Vec<DisassemblyComment>,
         referenced_address: Option<u64>,
+
+        kind: InstructionKind,
     },
+}
+#[derive(Clone, PartialEq)]
+pub enum InstructionKind {
+    Jump,
+    Other,
 }
 impl DisassemblyLine {
     /// return address of line if instruction
@@ -208,15 +217,6 @@ pub enum DisassemblyComment {
     BranchTarget(SymbolInfo),
     MemoryReference(SymbolInfo),
     Data(Vec<u8>),
-}
-
-// Simple formatter that doesn't add colors
-struct PlainFormatterOutput<'a>(&'a mut String);
-
-impl FormatterOutput for PlainFormatterOutput<'_> {
-    fn write(&mut self, text: &str, _kind: FormatterTextKind) {
-        self.0.push_str(text);
-    }
 }
 
 // Add a new struct to hold the binary data
@@ -335,8 +335,34 @@ pub fn disassemble_range(
         let start_index = (instruction.ip() - text_address) as usize;
         let instr_bytes = &text_data[start_index..start_index + instruction.len()];
 
+        // Simple formatter that doesn't add colors
+        struct PlainFormatterOutput<'a>(&'a mut Vec<Span<'static>>);
+
+        impl FormatterOutput for PlainFormatterOutput<'_> {
+            fn write(&mut self, text: &str, kind: FormatterTextKind) {
+                let color = match kind {
+                    FormatterTextKind::Directive | FormatterTextKind::Keyword => Color::LightYellow,
+                    FormatterTextKind::Prefix | FormatterTextKind::Mnemonic => Color::LightRed,
+                    FormatterTextKind::Register => Color::LightBlue,
+                    FormatterTextKind::Number => Color::LightCyan,
+                    _ => Color::White,
+                };
+
+                self.0
+                    .push(Span::styled(text.to_string(), Style::default().fg(color)));
+            }
+            fn write_mnemonic(&mut self, instruction: &Instruction, text: &str) {
+                let color = match instruction.mnemonic() {
+                    Mnemonic::Int3 => Color::DarkGray,
+                    _ => Color::LightRed,
+                };
+                self.0
+                    .push(Span::styled(text.to_string(), Style::default().fg(color)));
+            }
+        }
+
         // Format the instruction
-        let mut instr_text = String::new();
+        let mut instr_text = Vec::new();
         formatter.format(&instruction, &mut PlainFormatterOutput(&mut instr_text));
 
         let branch_target = instruction.near_branch_target();
@@ -348,6 +374,13 @@ pub fn disassemble_range(
             None
         };
 
+        let kind = match instruction.flow_control() {
+            FlowControl::IndirectBranch
+            | FlowControl::ConditionalBranch
+            | FlowControl::UnconditionalBranch => InstructionKind::Jump,
+            _ => InstructionKind::Other,
+        };
+
         // Create a structured instruction line
         let mut line = DisassemblyLine::Instruction {
             address,
@@ -355,6 +388,7 @@ pub fn disassemble_range(
             instruction: instr_text,
             comments: Vec::new(),
             referenced_address,
+            kind,
         };
 
         // Add branch target comments if applicable

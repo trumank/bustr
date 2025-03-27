@@ -1,3 +1,4 @@
+use crate::InstructionKind;
 use crate::jump_render::{JumpEdge, Jumps};
 use crate::{BinaryData, DisassemblyComment, DisassemblyLine, SymbolKind, ui::NavigationEntry};
 use ratatui::{
@@ -320,10 +321,10 @@ impl StatefulWidget for DisassemblyWidget<'_> {
         let jumps = state.disassembly.iter().flat_map(|line| match line {
             DisassemblyLine::Instruction {
                 address,
-                instruction,
                 referenced_address: Some(referenced),
+                kind,
                 ..
-            } if instruction.starts_with("j") => Some(JumpEdge::new(*address, *referenced)),
+            } if *kind == InstructionKind::Jump => Some(JumpEdge::new(*address, *referenced)),
             _ => None,
         });
 
@@ -392,22 +393,7 @@ fn format_disassembly_line<'a>(line: &'a DisassemblyLine, jumps: &'a Jumps) -> L
             spans.extend(crate::jump_render::render_jumps(*address, jumps));
 
             // Add instruction
-            let instr_parts: Vec<&str> = instruction.split_whitespace().collect();
-            if !instr_parts.is_empty() {
-                spans.push(Span::styled(
-                    instr_parts[0],
-                    Style::default().fg(Color::Red),
-                ));
-                spans.push(Span::raw(" "));
-
-                if instr_parts.len() > 1 {
-                    let operands = instr_parts[1..].join(" ");
-                    let operand_spans = highlight_operands(&operands);
-                    spans.extend(operand_spans);
-                }
-            } else {
-                spans.push(Span::raw(instruction));
-            }
+            spans.extend(instruction.clone());
 
             // Add comments
             if !comments.is_empty() {
@@ -443,37 +429,6 @@ fn format_disassembly_line<'a>(line: &'a DisassemblyLine, jumps: &'a Jumps) -> L
             ListItem::new(Line::from(spans))
         }
     }
-}
-
-pub fn highlight_operands(operands: &str) -> Vec<Span<'static>> {
-    let mut spans = Vec::new();
-
-    for part in operands.split(',') {
-        if !spans.is_empty() {
-            spans.push(Span::styled(",", Style::default().fg(Color::White)));
-            spans.push(Span::raw(" "));
-        }
-
-        let part = part.trim().to_string();
-
-        if part.starts_with("r")
-            || part.starts_with("e")
-            || [
-                "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp", "eax", "ebx", "ecx", "edx",
-                "esi", "edi", "ebp", "esp",
-            ]
-            .contains(&part.as_str())
-        {
-            spans.push(Span::styled(part, Style::default().fg(Color::Blue)));
-        } else if part.starts_with("0x") || part.chars().next().is_some_and(|c| c.is_ascii_digit())
-        {
-            spans.push(Span::styled(part, Style::default().fg(Color::Cyan)));
-        } else {
-            spans.push(Span::raw(part));
-        }
-    }
-
-    spans
 }
 
 pub fn format_data_spans(data: &[u8]) -> Span {
