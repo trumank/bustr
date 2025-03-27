@@ -19,7 +19,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Clear, ListItem, ListState, Paragraph},
 };
 use std::{error::Error, io, path::PathBuf};
 
@@ -503,10 +503,6 @@ pub fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Res
 
                         KeyCode::Char('/') => app.toggle_search(),
                         KeyCode::Char('x') => app.find_xref(),
-                        KeyCode::Char('p') => {
-                            app.search_state.toggle_search_mode();
-                            app.active_pane = Pane::Search;
-                        }
                         KeyCode::Enter => {
                             if app.active_pane == Pane::Symbols {
                                 app.select_symbol();
@@ -758,6 +754,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             .style(Style::default().fg(Color::Yellow));
 
         // Render the dialog
+        f.render_widget(Clear, dialog_area);
         f.render_widget(goto_input, dialog_area);
     }
 
@@ -765,8 +762,8 @@ fn ui(f: &mut Frame, app: &mut App) {
         let help_text = vec![
             "Help:",
             "q - Quit",
-            "h/? - Toggle help",
-            "Tab - Switch pane",
+            "? - Toggle help",
+            "Tab/Shift+Tab - Switch pane",
             "↑/↓/j/k - Scroll up/down",
             "PgUp/PgDn - Page up/down",
             "u/d - Half page up/down",
@@ -774,14 +771,15 @@ fn ui(f: &mut Frame, app: &mut App) {
             "h/l - Navigate back/forward",
             "L - Toggle debug log",
             "/ - Search symbols",
-            "x - Find XRefs",
-            "Ctrl+G - Go to address",
+            "x - Find XRef to selection",
+            "f - Follow address reference",
+            "Ctrl+g - Go to address",
             "Enter - Select item",
             "",
-            "In search/XRef/goto mode:",
+            "In search/goto mode:",
             "Esc - Exit mode",
             "Backspace - Delete character",
-            "f - Follow address reference",
+            "Enter - Submit search/goto",
         ];
 
         let help_paragraph = Paragraph::new(Text::from(help_text.join("\n")))
@@ -812,6 +810,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             )
             .split(help_area)[1];
 
+        f.render_widget(Clear, help_area);
         f.render_widget(help_paragraph, help_area);
     }
 
