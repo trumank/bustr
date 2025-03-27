@@ -119,38 +119,12 @@ fn load_pdb_symbols(image_base: u64, pdb_path: &Path) -> anyhow::Result<Vec<Symb
     Ok(symbols)
 }
 
-// CLI arguments using clap's derive feature
 #[derive(Parser)]
-#[clap(
-    author,
-    version,
-    about = "Disassembles binaries with debug symbol annotation"
-)]
+#[clap(author, version)]
 struct Cli {
-    /// Input binary file to disassemble
-    #[clap(value_parser)]
+    /// Input binary file to analyze
+    #[clap(index = 1)]
     input: PathBuf,
-
-    /// Path to PDB file for debug symbols
-    #[clap(short, long, value_parser)]
-    pdb: Option<PathBuf>,
-
-    /// Start address for disassembly (hexadecimal)
-    #[clap(short, long, value_parser = parse_hex_address)]
-    address: Option<u64>,
-
-    /// Symbol to disassemble
-    #[clap(short, long)]
-    symbol: Option<String>,
-
-    /// Number of bytes to disassemble
-    #[clap(short, long)]
-    length: Option<usize>,
-}
-
-fn parse_hex_address(s: &str) -> Result<u64, String> {
-    let s = s.trim_start_matches("0x");
-    u64::from_str_radix(s, 16).map_err(|e| format!("Invalid hexadecimal address: {}", e))
 }
 
 // Define structured types for disassembly output
@@ -452,9 +426,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let args = Cli::parse();
 
     let adj_pdb = args.input.with_extension("pdb");
-    let pdb = if let Some(pdb) = args.pdb.as_deref() {
-        Some(pdb)
-    } else if adj_pdb.exists() {
+    let pdb = if adj_pdb.exists() {
         Some(adj_pdb.as_ref())
     } else {
         None
