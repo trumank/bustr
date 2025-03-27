@@ -149,19 +149,34 @@ impl<'data> App<'data> {
         self.show_help = !self.show_help;
     }
 
-    pub fn toggle_pane(&mut self) {
-        self.active_pane = match self.active_pane {
-            Pane::Disassembly => Pane::Symbols,
-            Pane::Symbols => Pane::Search,
-            Pane::Search => {
-                if self.show_log {
-                    Pane::DebugLog
-                } else {
-                    Pane::Disassembly
+    pub fn toggle_pane(&mut self, forward: bool) {
+        if forward {
+            self.active_pane = match self.active_pane {
+                Pane::Disassembly => Pane::Symbols,
+                Pane::Symbols => Pane::Search,
+                Pane::Search => {
+                    if self.show_log {
+                        Pane::DebugLog
+                    } else {
+                        Pane::Disassembly
+                    }
                 }
-            }
-            Pane::DebugLog => Pane::Disassembly,
-        };
+                Pane::DebugLog => Pane::Disassembly,
+            };
+        } else {
+            self.active_pane = match self.active_pane {
+                Pane::Symbols => Pane::Disassembly,
+                Pane::Search => Pane::Symbols,
+                Pane::DebugLog => Pane::Search,
+                Pane::Disassembly => {
+                    if self.show_log {
+                        Pane::DebugLog
+                    } else {
+                        Pane::Search
+                    }
+                }
+            };
+        }
     }
 
     pub fn select_symbol(&mut self) {
@@ -441,7 +456,8 @@ pub fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Res
                         KeyCode::Esc => app.toggle_search(),
                         KeyCode::Backspace => app.backspace_search(),
                         KeyCode::Enter => app.select_symbol(),
-                        KeyCode::Tab => app.toggle_pane(),
+                        KeyCode::Tab => app.toggle_pane(true),
+                        KeyCode::BackTab => app.toggle_pane(false),
                         KeyCode::Up => app.scroll_up(1),
                         KeyCode::Down => app.scroll_down(1),
                         KeyCode::Char(c) => app.add_to_search(c),
@@ -461,7 +477,8 @@ pub fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Res
                         }
 
                         KeyCode::Char('?') => app.toggle_help(),
-                        KeyCode::Tab => app.toggle_pane(),
+                        KeyCode::Tab => app.toggle_pane(true),
+                        KeyCode::BackTab => app.toggle_pane(false),
                         KeyCode::Up | KeyCode::Char('k') => app.scroll_up(1),
                         KeyCode::Down | KeyCode::Char('j') => app.scroll_down(1),
                         KeyCode::PageUp => {
