@@ -438,7 +438,7 @@ pub fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Res
                     }
                 } else if app.active_pane == Pane::Search && app.search_state.search_mode && !ctrl {
                     match key.code {
-                        KeyCode::Esc => app.find_xref(),
+                        KeyCode::Esc => app.search_state.toggle_search_mode(),
                         KeyCode::Backspace => app.search_state.remove_from_query(),
                         KeyCode::Enter => {
                             if let Some(binary_data) = &app.binary_data {
@@ -470,8 +470,6 @@ pub fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Res
                             return Ok(());
                         }
 
-                        KeyCode::Char('h') if ctrl => app.active_pane = Pane::Disassembly,
-                        KeyCode::Char('l') if ctrl => app.active_pane = Pane::Symbols,
                         KeyCode::Char('g') if ctrl => {
                             app.toggle_goto_mode();
                         }
