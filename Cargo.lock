@@ -134,6 +134,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1628fb46dfa0b37568d12e5edd512553eccf6a22a78e8bde00bb4aed84d5bdbf"
 
 [[package]]
+name = "bustr"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "color-eyre",
+ "crossterm 0.27.0",
+ "iced-x86",
+ "itertools 0.14.0",
+ "libc",
+ "memmap2",
+ "msvc-demangler",
+ "nucleo",
+ "patternsleuth_image",
+ "patternsleuth_scanner",
+ "pdb",
+ "ratatui",
+ "rayon",
+ "tracing",
+ "tracing-subscriber",
+ "tui-logger",
+]
+
+[[package]]
 name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -253,15 +277,6 @@ name = "colorchoice"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b63caa9aa9397e2d9480a9b13673856c78d8ac123288526c37d7839f2a86990"
-
-[[package]]
-name = "colored"
-version = "3.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fde0e0ec90c9dfb3b4b1a0891a7dcd0e2bffde2f7efed5fe7c9bb00e5bfb915e"
-dependencies = [
- "windows-sys 0.59.0",
-]
 
 [[package]]
 name = "compact_str"
@@ -420,32 +435,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "dirus"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "color-eyre",
- "colored",
- "crossterm 0.27.0",
- "iced-x86",
- "itertools 0.14.0",
- "libc",
- "memmap2",
- "msvc-demangler",
- "nucleo",
- "page_size",
- "patternsleuth_image",
- "patternsleuth_scanner",
- "pdb",
- "ratatui",
- "rayon",
- "tracing",
- "tracing-subscriber",
- "tui-logger",
 ]
 
 [[package]]
@@ -898,16 +887,6 @@ name = "owo-colors"
 version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c1b04fb49957986fdce4d6ee7a65027d55d4b6d2265e5848bbb507b58ccfdb6f"
-
-[[package]]
-name = "page_size"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30d5b2194ed13191c1999ae0704b7839fb18384fa22e49b57eeaa97d79ce40da"
-dependencies = [
- "libc",
- "winapi",
-]
 
 [[package]]
 name = "parking_lot"
