@@ -19,7 +19,6 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 use std::{error::Error, fmt};
 use ui::{App, restore_terminal, run_app, setup_terminal};
 
@@ -476,22 +475,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     app.file_path = Some(args.input);
 
     // Run the app
-    let tick_rate = Duration::from_millis(250);
-    let app = run_app(&mut terminal, app, tick_rate)?;
+    run_app(&mut terminal, &mut app)?;
 
     // Restore terminal
     restore_terminal(&mut terminal)?;
 
-    let should_quit = app.should_quit;
-
     // dropping can take a long time so just don't
     std::mem::forget(app);
 
-    // If the app should quit, exit normally
-    if should_quit {
-        Ok(())
-    } else {
-        // This shouldn't happen, but just in case
-        Err("Application terminated unexpectedly".into())
-    }
+    Ok(())
 }

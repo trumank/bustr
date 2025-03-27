@@ -1,5 +1,5 @@
 use crate::{
-    BinaryData, DisassemblyLine, SymbolInfo, SymbolKind,
+    BinaryData, SymbolInfo, SymbolKind,
     disassembly_ui::{DisassemblyState, DisassemblyWidget},
     fuzzy::highlight_matches,
     lazy_list::{LazyList, ListItemProducer},
@@ -21,12 +21,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, ListItem, ListState, Paragraph},
 };
-use std::{
-    error::Error,
-    io,
-    path::PathBuf,
-    time::{Duration, Instant},
-};
+use std::{error::Error, io, path::PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct NavigationEntry {
@@ -96,10 +91,6 @@ impl<'data> App<'data> {
 
             search_state,
         }
-    }
-
-    pub fn set_disassembly(&mut self, disassembly: Vec<DisassemblyLine>) {
-        self.disassembly_state.disassembly = disassembly;
     }
 
     pub fn set_symbols(&mut self, symbols: Vec<SymbolInfo>) {
@@ -411,172 +402,114 @@ pub fn jump_to_bottom(state: &mut ListState, item_len: usize) {
     state.select(Some(last));
 }
 
-pub fn run_app<'data, B: Backend>(
-    terminal: &mut Terminal<B>,
-    mut app: App<'data>,
-    tick_rate: Duration,
-) -> io::Result<App<'data>> {
-    let mut last_tick = Instant::now();
+pub fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<()> {
     loop {
-        if app.disassembly_state.needs_refresh {
-            if let (Some(height), Some(binary_data)) = (
-                terminal.size().ok().map(|s| s.height as usize),
-                &app.binary_data,
-            ) {
-                const FROM_TOP: usize = 15;
+        terminal.draw(|f| ui(f, app))?;
 
-                let mut first_line = None;
-                match crate::disassemble_range(
-                    binary_data,
-                    app.disassembly_state.current_address - 50,
-                    &mut |dis| {
-                        if first_line.is_none() {
-                            first_line = dis
-                                .iter()
-                                .position(|l| {
-                                    l.address()
-                                        .is_some_and(|a| a > app.disassembly_state.current_address)
-                                })
-                                .map(|l| l - 1)
+        if let Event::Key(key) = event::read()? {
+            if key.kind == KeyEventKind::Press {
+                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+                // Handle goto mode
+                if app.goto_mode && !ctrl {
+                    match key.code {
+                        KeyCode::Esc => app.toggle_goto_mode(),
+                        KeyCode::Backspace => app.backspace_goto_query(),
+                        KeyCode::Enter => app.submit_goto_query(),
+                        KeyCode::Char(c) if c.is_ascii_hexdigit() || c == 'x' => {
+                            app.add_to_goto_query(c)
                         }
-                        if let Some(first_line) = first_line {
-                            dis.len() + FROM_TOP < height + first_line
-                        } else {
-                            true
-                        }
-                    },
-                ) {
-                    Ok(disassembly) => {
-                        let selected = first_line.unwrap_or(0);
-                        app.set_disassembly(disassembly);
-                        app.disassembly_state.select(Some(selected));
-                        *app.disassembly_state.offset_mut() = selected.saturating_sub(FROM_TOP);
+                        _ => {}
                     }
-                    Err(e) => {
-                        eprintln!("Error refreshing disassembly: {}", e);
+                } else if app.active_pane == Pane::Search && app.search_state.search_mode && !ctrl {
+                    match key.code {
+                        KeyCode::Esc => app.find_xref(),
+                        KeyCode::Backspace => app.search_state.remove_from_query(),
+                        KeyCode::Enter => {
+                            if let Some(binary_data) = &app.binary_data {
+                                app.search_state.submit_query(binary_data);
+                                app.search_state.selected_result().inspect(|s| {
+                                    app.disassembly_state.set_current_address(s.address)
+                                });
+                            }
+                        }
+                        KeyCode::Char(c) => app.search_state.add_to_query(c),
+                        _ => {}
                     }
-                }
-                app.disassembly_state.needs_refresh = false;
-            }
-        }
-
-        terminal.draw(|f| ui(f, &mut app))?;
-
-        let timeout = tick_rate
-            .checked_sub(last_tick.elapsed())
-            .unwrap_or_else(|| Duration::from_secs(0));
-
-        if crossterm::event::poll(timeout)? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-
-                    // Handle goto mode
-                    if app.goto_mode && !ctrl {
-                        match key.code {
-                            KeyCode::Esc => app.toggle_goto_mode(),
-                            KeyCode::Backspace => app.backspace_goto_query(),
-                            KeyCode::Enter => app.submit_goto_query(),
-                            KeyCode::Char(c) if c.is_ascii_hexdigit() || c == 'x' => {
-                                app.add_to_goto_query(c)
-                            }
-                            _ => {}
+                } else if app.active_pane == Pane::Symbols && app.search_mode && !ctrl {
+                    match key.code {
+                        KeyCode::Esc => app.toggle_search(),
+                        KeyCode::Backspace => app.backspace_search(),
+                        KeyCode::Enter => app.select_symbol(),
+                        KeyCode::Tab => app.toggle_pane(),
+                        KeyCode::Up => app.scroll_up(1),
+                        KeyCode::Down => app.scroll_down(1),
+                        KeyCode::Char(c) => app.add_to_search(c),
+                        _ => {}
+                    }
+                } else {
+                    match key.code {
+                        KeyCode::Char('q') => {
+                            app.should_quit = true;
+                            return Ok(());
                         }
-                    } else if app.active_pane == Pane::Search
-                        && app.search_state.search_mode
-                        && !ctrl
-                    {
-                        match key.code {
-                            KeyCode::Esc => app.find_xref(),
-                            KeyCode::Backspace => app.search_state.remove_from_query(),
-                            KeyCode::Enter => {
-                                if let Some(binary_data) = &app.binary_data {
-                                    app.search_state.submit_query(binary_data);
-                                    app.search_state.selected_result().inspect(|s| {
-                                        app.disassembly_state.set_current_address(s.address)
-                                    });
-                                }
-                            }
-                            KeyCode::Char(c) => app.search_state.add_to_query(c),
-                            _ => {}
-                        }
-                    } else if app.active_pane == Pane::Symbols && app.search_mode && !ctrl {
-                        match key.code {
-                            KeyCode::Esc => app.toggle_search(),
-                            KeyCode::Backspace => app.backspace_search(),
-                            KeyCode::Enter => app.select_symbol(),
-                            KeyCode::Tab => app.toggle_pane(),
-                            KeyCode::Up => app.scroll_up(1),
-                            KeyCode::Down => app.scroll_down(1),
-                            KeyCode::Char(c) => app.add_to_search(c),
-                            _ => {}
-                        }
-                    } else {
-                        match key.code {
-                            KeyCode::Char('q') => {
-                                app.should_quit = true;
-                                break;
-                            }
 
-                            KeyCode::Char('h') if ctrl => app.active_pane = Pane::Disassembly,
-                            KeyCode::Char('l') if ctrl => app.active_pane = Pane::Symbols,
-                            KeyCode::Char('g') if ctrl => {
-                                app.toggle_goto_mode();
-                            }
-
-                            KeyCode::Char('?') => app.toggle_help(),
-                            KeyCode::Tab => app.toggle_pane(),
-                            KeyCode::Up | KeyCode::Char('k') => app.scroll_up(1),
-                            KeyCode::Down | KeyCode::Char('j') => app.scroll_down(1),
-                            KeyCode::PageUp => {
-                                let height = terminal.size()?.height as usize;
-                                app.scroll_up(height - 2);
-                            }
-                            KeyCode::PageDown => {
-                                let height = terminal.size()?.height as usize;
-                                app.scroll_down(height - 2);
-                            }
-                            KeyCode::Char('d') => {
-                                let height = terminal.size()?.height as usize;
-                                app.scroll_down((height - 2) / 2); // Half page down
-                            }
-                            KeyCode::Char('u') => {
-                                let height = terminal.size()?.height as usize;
-                                app.scroll_up((height - 2) / 2); // Half page up
-                            }
-                            KeyCode::Char('g') => app.jump_to_top(),
-                            KeyCode::Char('G') => app.jump_to_bottom(),
-                            KeyCode::Char('h') if !ctrl => app.navigate_back(),
-                            KeyCode::Char('l') if !ctrl => app.navigate_forward(),
-                            KeyCode::Char('L') => app.toggle_log(),
-
-                            KeyCode::Char('/') => app.toggle_search(),
-                            KeyCode::Char('x') => app.find_xref(),
-                            KeyCode::Char('p') => {
-                                app.search_state.toggle_search_mode();
-                                app.active_pane = Pane::Search;
-                            }
-                            KeyCode::Enter => {
-                                if app.active_pane == Pane::Symbols {
-                                    app.select_symbol();
-                                } else if app.active_pane == Pane::Search {
-                                    app.select_search_result();
-                                }
-                            }
-                            KeyCode::Char('f') => app.disassembly_state.follow_address_reference(),
-                            _ => {}
+                        KeyCode::Char('h') if ctrl => app.active_pane = Pane::Disassembly,
+                        KeyCode::Char('l') if ctrl => app.active_pane = Pane::Symbols,
+                        KeyCode::Char('g') if ctrl => {
+                            app.toggle_goto_mode();
                         }
+
+                        KeyCode::Char('?') => app.toggle_help(),
+                        KeyCode::Tab => app.toggle_pane(),
+                        KeyCode::Up | KeyCode::Char('k') => app.scroll_up(1),
+                        KeyCode::Down | KeyCode::Char('j') => app.scroll_down(1),
+                        KeyCode::PageUp => {
+                            let height = terminal.size()?.height as usize;
+                            app.scroll_up(height - 2);
+                        }
+                        KeyCode::PageDown => {
+                            let height = terminal.size()?.height as usize;
+                            app.scroll_down(height - 2);
+                        }
+                        KeyCode::Char('d') => {
+                            let height = terminal.size()?.height as usize;
+                            app.scroll_down((height - 2) / 2); // Half page down
+                        }
+                        KeyCode::Char('u') => {
+                            let height = terminal.size()?.height as usize;
+                            app.scroll_up((height - 2) / 2); // Half page up
+                        }
+                        KeyCode::Char('g') => app.jump_to_top(),
+                        KeyCode::Char('G') => app.jump_to_bottom(),
+                        KeyCode::Char('h') if !ctrl => app.navigate_back(),
+                        KeyCode::Char('l') if !ctrl => app.navigate_forward(),
+                        KeyCode::Char('L') => app.toggle_log(),
+
+                        KeyCode::Char('/') => app.toggle_search(),
+                        KeyCode::Char('x') => app.find_xref(),
+                        KeyCode::Char('p') => {
+                            app.search_state.toggle_search_mode();
+                            app.active_pane = Pane::Search;
+                        }
+                        KeyCode::Enter => {
+                            if app.active_pane == Pane::Symbols {
+                                app.select_symbol();
+                            } else if app.active_pane == Pane::Search {
+                                app.select_search_result();
+                            }
+                        }
+                        KeyCode::Char('f') => app.disassembly_state.follow_address_reference(),
+                        _ => {}
                     }
                 }
             }
         }
 
-        if last_tick.elapsed() >= tick_rate {
-            last_tick = Instant::now();
+        if app.should_quit {
+            return Ok(());
         }
     }
-
-    Ok(app)
 }
 
 fn ui(f: &mut Frame, app: &mut App) {
@@ -609,7 +542,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         .map(|p| p.to_string_lossy())
         .unwrap_or_default();
 
-    let disassembly_widget = DisassemblyWidget::new()
+    let disassembly_widget = DisassemblyWidget::new(app.binary_data.as_ref())
         .block(
             Block::default()
                 .title(format!(

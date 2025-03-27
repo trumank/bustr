@@ -15,13 +15,14 @@ pub struct DisassemblyState {
     list_state: ListState,
     /// Current address being viewed
     pub current_address: u64,
-
+    /// Disassembly lines
     pub disassembly: Vec<DisassemblyLine>,
-
+    /// Navigation stack
     pub navigation_stack: Vec<NavigationEntry>,
+    /// Current position in navigation stack
     pub navigation_index: usize,
-
-    pub needs_refresh: bool,
+    /// Last refresh address
+    last_refresh_address: u64,
 }
 
 impl DisassemblyState {
@@ -34,11 +35,65 @@ impl DisassemblyState {
             list_state,
             current_address: 0,
             disassembly: Vec::new(),
-
             navigation_stack: Vec::new(),
             navigation_index: 0,
+            last_refresh_address: 0,
+        }
+    }
 
-            needs_refresh: false,
+    /// Sets the current address and updates the disassembly if needed
+    pub fn set_current_address(&mut self, address: u64) {
+        tracing::info!("set address {address:x}");
+        self.current_address = address;
+
+        // Only push to navigation stack if this is a new navigation (not from history)
+        if !self.navigation_stack.is_empty() {
+            self.navigation_index += 1;
+        }
+
+        let entry = NavigationEntry {
+            address,
+            scroll_offset: self.offset(),
+        };
+
+        if let Some(existing) = self.navigation_stack.get_mut(self.navigation_index) {
+            *existing = entry;
+        } else {
+            self.navigation_stack.push(entry);
+        }
+
+        self.set_address(address);
+    }
+
+    /// Updates the disassembly if needed
+    fn update_disassembly(&mut self, binary_data: &BinaryData, height: usize) {
+        // Only update if we have binary data and the address has changed
+        if self.current_address != self.last_refresh_address {
+            const FROM_TOP: usize = 15;
+
+            let mut first_line = None;
+            let disassembly =
+                crate::disassemble_range(binary_data, self.current_address - 50, &mut |dis| {
+                    if first_line.is_none() {
+                        first_line = dis
+                            .iter()
+                            .position(|l| l.address().is_some_and(|a| a > self.current_address))
+                            .map(|l| l - 1)
+                    }
+                    if let Some(first_line) = first_line {
+                        dis.len() + FROM_TOP < height + first_line
+                    } else {
+                        true
+                    }
+                })
+                .unwrap();
+
+            let selected = first_line.unwrap_or(0);
+            self.disassembly = disassembly;
+            self.select(Some(selected));
+            *self.offset_mut() = selected.saturating_sub(FROM_TOP);
+
+            self.last_refresh_address = self.current_address;
         }
     }
 
@@ -70,27 +125,6 @@ impl DisassemblyState {
     /// Gets a mutable reference to the offset
     pub fn offset_mut(&mut self) -> &mut usize {
         self.list_state.offset_mut()
-    }
-
-    pub fn set_current_address(&mut self, address: u64) {
-        tracing::info!("set address {address:x}");
-        self.current_address = address;
-        self.needs_refresh = true;
-
-        // Only push to navigation stack if this is a new navigation (not from history)
-        if !self.navigation_stack.is_empty() {
-            self.navigation_index += 1;
-        }
-        let entry = NavigationEntry {
-            address,
-            scroll_offset: self.offset(),
-        };
-        if let Some(existing) = self.navigation_stack.get_mut(self.navigation_index) {
-            *existing = entry;
-        } else {
-            self.navigation_stack.push(entry);
-        }
-        self.set_address(address);
     }
 
     fn find_previous_address(&self) -> Option<u64> {
@@ -227,7 +261,6 @@ impl DisassemblyState {
             let entry = &self.navigation_stack[self.navigation_index];
             self.current_address = entry.address;
             *self.offset_mut() = entry.scroll_offset;
-            self.needs_refresh = true;
         }
     }
 
@@ -237,7 +270,6 @@ impl DisassemblyState {
             let entry = &self.navigation_stack[self.navigation_index];
             self.current_address = entry.address;
             *self.offset_mut() = entry.scroll_offset;
-            self.needs_refresh = true;
         }
     }
 
@@ -285,19 +317,22 @@ fn iter_blocks(disassembly: &[DisassemblyLine]) -> impl Iterator<Item = DisBlock
 }
 
 /// Disassembly widget that wraps the existing list widget
-pub struct DisassemblyWidget<'a> {
+pub struct DisassemblyWidget<'a, 'data> {
     /// Block to wrap the widget in
     block: Option<Block<'a>>,
     /// Highlight style for selected items
     highlight_style: Style,
+
+    binary_data: Option<&'a BinaryData<'data>>,
 }
 
-impl<'a> DisassemblyWidget<'a> {
+impl<'a, 'data> DisassemblyWidget<'a, 'data> {
     /// Creates a new disassembly widget
-    pub fn new() -> Self {
+    pub fn new(binary_data: Option<&'a BinaryData<'data>>) -> Self {
         Self {
             block: None,
             highlight_style: Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            binary_data,
         }
     }
 
@@ -314,10 +349,25 @@ impl<'a> DisassemblyWidget<'a> {
     }
 }
 
-impl StatefulWidget for DisassemblyWidget<'_> {
+impl StatefulWidget for DisassemblyWidget<'_, '_> {
     type State = DisassemblyState;
 
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
+        // Update the disassembly if needed
+        if let Some(binary_data) = self.binary_data {
+            let height = area.height as usize;
+            state.update_disassembly(binary_data, height);
+
+            // fill up the screen in case it was expanded
+            let visible_lines = state
+                .disassembly
+                .len()
+                .saturating_sub(state.list_state.offset());
+            if height > visible_lines {
+                state.append_disassembly(binary_data, height - visible_lines);
+            }
+        }
+
         let jumps = state.disassembly.iter().flat_map(|line| match line {
             DisassemblyLine::Instruction {
                 address,
